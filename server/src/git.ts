@@ -381,15 +381,6 @@ export async function commitAndPushFile(
     throw new Error("当前文件没有可提交的变更");
   }
 
-  const effectiveRuntime: RuntimeState = {
-    ...runtime,
-    git: {
-      ...runtime.git,
-      username: authorName,
-      email: authorEmail,
-      defaultCommitMessage: commitMessage
-    }
-  };
   const pushRemoteUrl = buildAuthenticatedRemoteUrl(config.repo.remoteUrl, {
     username: config.repo.auth.username,
     password: input.password?.trim() || config.repo.auth.password
