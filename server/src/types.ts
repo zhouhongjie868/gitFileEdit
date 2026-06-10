@@ -14,18 +14,12 @@ export interface AppConfig {
       username: string;
       password: string;
     };
+    commitMessagePrefix: string;
     cloneOnStart: boolean;
   };
 }
 
-export interface RuntimeGitSettings {
-  username: string;
-  email: string;
-  defaultCommitMessage: string;
-}
-
 export interface RuntimeState {
-  git: RuntimeGitSettings;
   lastSyncedAt: string | null;
 }
 
@@ -74,7 +68,5 @@ export interface FileDetail {
 }
 
 export interface GitSettingsSummary {
-  username: string;
-  email: string;
-  defaultCommitMessage: string;
+  commitMessagePrefix: string;
 }

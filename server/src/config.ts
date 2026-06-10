@@ -58,8 +58,8 @@ const DEFAULT_APP_CONFIG: AppConfig = {
       ".md"
     ],
     auth: {
-      username: "151577",
-      password: "nbcb,111"
+      username: "224270",
+      password: "nbcb,123"
     },
     cloneOnStart: true
   }
@@ -67,9 +67,7 @@ const DEFAULT_APP_CONFIG: AppConfig = {
 
 const DEFAULT_RUNTIME_STATE: RuntimeState = {
   git: {
-    username: "",
-    email: "",
-    defaultCommitMessage: "chore: update file via web console"
+    defaultCommitMessage: "config: "
   },
   lastSyncedAt: null
 };
@@ -104,8 +102,6 @@ export async function saveRuntimeState(state: RuntimeState): Promise<RuntimeStat
 }
 
 export async function updateRuntimeGitSettings(input: {
-  username?: string;
-  email?: string;
   defaultCommitMessage?: string;
 }): Promise<RuntimeState> {
   const current = await loadRuntimeState();
@@ -113,8 +109,6 @@ export async function updateRuntimeGitSettings(input: {
     ...current,
     git: {
       ...current.git,
-      username: input.username ?? current.git.username,
-      email: input.email ?? current.git.email,
       defaultCommitMessage:
         input.defaultCommitMessage ?? current.git.defaultCommitMessage
     }
@@ -158,8 +152,6 @@ export function getEnvironmentOptions(config: AppConfig): RepoEnvironmentOption[
 
 export function toGitSettingsSummary(state: RuntimeState): GitSettingsSummary {
   return {
-    username: state.git.username,
-    email: state.git.email,
     defaultCommitMessage: state.git.defaultCommitMessage
   };
 }
