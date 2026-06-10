@@ -723,7 +723,7 @@ export default function App(): JSX.Element {
 
           {activeEnvironment ? (
             <label className="form-row">
-              <span>Namespace</span>
+              <span>名称</span>
               <select
                 value={activeNamespace?.id ?? ""}
                 onChange={(event) => {
