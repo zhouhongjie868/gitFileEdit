@@ -30,6 +30,12 @@ interface NamespaceOption {
 }
 
 const ROOT_NAMESPACE_ID = "__root__";
+const DEFAULT_NAMESPACE_IDS_BY_ENVIRONMENT: Record<string, string[]> = {
+  dev: ["finagent-tob-dev", "finagentservice-tob-dev"],
+  sit: ["finagent-tob", "finagentservice-tob"],
+  uat: ["finagent-tob-uat", "finagentservice-tob-uat"],
+  prod: ["finagent-tob", "finagentservice-tob"]
+};
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -112,7 +118,14 @@ function getNamespaceIdForFile(filePath: string, environmentRoot: string): strin
   return segments[0];
 }
 
-function getNamespaceOptions(
+function getDefaultNamespaceOptions(environmentId: string): NamespaceOption[] {
+  return (DEFAULT_NAMESPACE_IDS_BY_ENVIRONMENT[environmentId] ?? []).map((item) => ({
+    id: item,
+    label: item
+  }));
+}
+
+function scanNamespaceOptions(
   files: RepoFileSummary[],
   environmentRoot: string
 ): NamespaceOption[] {
@@ -141,6 +154,26 @@ function getNamespaceOptions(
     }
     return left.label.localeCompare(right.label, "zh-CN");
   });
+}
+
+function getNamespaceOptions(
+  environmentId: string,
+  files: RepoFileSummary[],
+  environmentRoot: string
+): NamespaceOption[] {
+  const merged = new Map<string, NamespaceOption>();
+
+  for (const item of getDefaultNamespaceOptions(environmentId)) {
+    merged.set(item.id, item);
+  }
+
+  for (const item of scanNamespaceOptions(files, environmentRoot)) {
+    if (!merged.has(item.id)) {
+      merged.set(item.id, item);
+    }
+  }
+
+  return Array.from(merged.values());
 }
 
 function getPathWithinNamespace(
@@ -375,6 +408,7 @@ export default function App(): JSX.Element {
       ROOT_NAMESPACE_ID;
     const namespaceOptions = derivedEnvironmentRoot
       ? getNamespaceOptions(
+          derivedEnvironment,
           data.files.filter((file) => getPathWithinRoot(file.path, derivedEnvironmentRoot) !== null),
           derivedEnvironmentRoot
         )
@@ -605,7 +639,7 @@ export default function App(): JSX.Element {
     ? files.filter((file) => getPathWithinRoot(file.path, activeEnvironment.root) !== null)
     : files;
   const namespaceOptions = activeEnvironment
-    ? getNamespaceOptions(environmentFiles, activeEnvironment.root)
+    ? getNamespaceOptions(activeEnvironment.id, environmentFiles, activeEnvironment.root)
     : [];
   const activeNamespace =
     namespaceOptions.find((item) => item.id === selectedNamespace) ?? namespaceOptions[0] ?? null;
@@ -675,7 +709,11 @@ export default function App(): JSX.Element {
                   ? files.filter((file) => getPathWithinRoot(file.path, nextEnvironment.root) !== null)
                   : [];
                 const nextNamespaceOptions = nextEnvironment
-                  ? getNamespaceOptions(nextEnvironmentFiles, nextEnvironment.root)
+                  ? getNamespaceOptions(
+                      nextEnvironment.id,
+                      nextEnvironmentFiles,
+                      nextEnvironment.root
+                    )
                   : [];
                 const replacedPath = selectedPath
                   ? replaceEnvironmentRoot(selectedPath, environmentOptions, nextEnvironmentId)
