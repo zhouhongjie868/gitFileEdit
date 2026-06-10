@@ -1,6 +1,7 @@
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import {
+  getEnvironmentOptions,
   loadAppConfig,
   loadRuntimeState,
   markLastSyncedAt,
@@ -48,6 +49,7 @@ async function buildBootstrapPayload() {
       remoteUrl: config.repo.remoteUrl,
       branch: config.repo.branch,
       defaultFile: config.repo.defaultFile,
+      environments: getEnvironmentOptions(config),
       visibleRoots: normalizeVisibleRoots(config),
       port: config.server.port
     },

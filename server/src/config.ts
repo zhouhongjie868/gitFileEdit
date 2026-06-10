@@ -1,15 +1,37 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { AppConfig, GitSettingsSummary, RuntimeState } from "./types";
+import type {
+  AppConfig,
+  GitSettingsSummary,
+  RepoEnvironmentOption,
+  RuntimeState
+} from "./types";
 
 export const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const APP_CONFIG_PATH = path.resolve(PROJECT_ROOT, "data/app.config.json");
 const RUNTIME_STATE_PATH = path.resolve(PROJECT_ROOT, "data/runtime.json");
-const DEFAULT_VISIBLE_ROOTS = [
-  "nacos-config/config/dev",
-  "nacos-config/config/sit",
-  "nacos-config/config/uat",
-  "nacos-config/config/prod"
+const DEFAULT_CONFIG_ROOT = "nacos-config/config";
+const DEFAULT_ENVIRONMENTS: RepoEnvironmentOption[] = [
+  {
+    id: "dev",
+    label: "开发环境",
+    root: `${DEFAULT_CONFIG_ROOT}/dev`
+  },
+  {
+    id: "sit",
+    label: "测试环境",
+    root: `${DEFAULT_CONFIG_ROOT}/sit`
+  },
+  {
+    id: "uat",
+    label: "UAT环境",
+    root: `${DEFAULT_CONFIG_ROOT}/uat`
+  },
+  {
+    id: "prod",
+    label: "生产环境",
+    root: `${DEFAULT_CONFIG_ROOT}/prod`
+  }
 ];
 
 const DEFAULT_APP_CONFIG: AppConfig = {
@@ -21,7 +43,7 @@ const DEFAULT_APP_CONFIG: AppConfig = {
     remoteUrl: "http://12.99.223.130:30005/enterprise/LMA/aifp-config-tob.git",
     branch: "main",
     defaultFile: "dev/app.yaml",
-    visibleRoots: DEFAULT_VISIBLE_ROOTS,
+    configRoot: DEFAULT_CONFIG_ROOT,
     allowedExtensions: [
       ".json",
       ".yaml",
@@ -113,11 +135,25 @@ export function resolveRepoPath(config: AppConfig): string {
 export function normalizeVisibleRoots(config: AppConfig): string[] {
   const rawRoots = config.repo.visibleRoots?.length
     ? config.repo.visibleRoots
-    : DEFAULT_VISIBLE_ROOTS;
+    : getEnvironmentOptions(config).map((item) => item.root);
 
   return rawRoots
     .map((item) => item.trim().replace(/^\/+|\/+$/g, ""))
     .filter(Boolean);
+}
+
+export function getEnvironmentOptions(config: AppConfig): RepoEnvironmentOption[] {
+  const configRoot = (config.repo.configRoot || DEFAULT_CONFIG_ROOT)
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
+  if (!configRoot) {
+    return DEFAULT_ENVIRONMENTS;
+  }
+
+  return DEFAULT_ENVIRONMENTS.map((item) => ({
+    ...item,
+    root: `${configRoot}/${item.id}`
+  }));
 }
 
 export function toGitSettingsSummary(state: RuntimeState): GitSettingsSummary {

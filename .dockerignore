@@ -3,3 +3,7 @@ dist
 .git
 data/repo
 data/runtime.json
+.codex
+.agents
+Dockerfile*
+README.md

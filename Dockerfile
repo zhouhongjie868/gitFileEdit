@@ -1,25 +1,31 @@
-FROM node:20-alpine AS deps
+# syntax=docker/dockerfile:1.7
+
+FROM node:20-alpine AS base
 WORKDIR /app
 RUN apk add --no-cache git
+ENV npm_config_audit=false \
+    npm_config_fund=false \
+    npm_config_update_notifier=false \
+    npm_config_progress=false
+
+FROM base AS deps
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --cache /root/.npm --prefer-offline
 
 FROM deps AS build
-WORKDIR /app
 COPY tsconfig.base.json vite.config.ts index.html ./
 COPY client ./client
 COPY server ./server
-COPY data ./data
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM node:20-alpine AS runtime
-WORKDIR /app
-RUN apk add --no-cache git
+FROM base AS runtime
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/data ./data
+COPY data/app.config.json ./data/app.config.json
+ENV NODE_ENV=production
 ENV PORT=8090
 EXPOSE 8090
 CMD ["node", "dist/server/index.js"]

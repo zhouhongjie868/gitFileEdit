@@ -7,7 +7,8 @@ export interface AppConfig {
     remoteUrl: string;
     branch: string;
     defaultFile: string;
-    visibleRoots: string[];
+    configRoot?: string;
+    visibleRoots?: string[];
     allowedExtensions: string[];
     auth: {
       username: string;
@@ -45,6 +46,12 @@ export interface RepoStatus {
   head: string | null;
   lastError: string | null;
   lastSyncedAt: string | null;
+}
+
+export interface RepoEnvironmentOption {
+  id: string;
+  label: string;
+  root: string;
 }
 
 export interface CommitSnapshot {

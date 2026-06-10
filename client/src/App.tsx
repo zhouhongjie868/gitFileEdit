@@ -4,6 +4,7 @@ import type {
   BootstrapResponse,
   FileDetail,
   GitSettingsSummary,
+  RepoEnvironmentOption,
   RepoFileSummary
 } from "./types";
 
@@ -54,6 +55,23 @@ function formatSize(size: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function replaceEnvironmentRoot(
+  filePath: string,
+  environments: RepoEnvironmentOption[],
+  nextEnvironmentId: string
+): string | null {
+  const currentEnvironment = environments.find(
+    (item) => filePath === item.root || filePath.startsWith(`${item.root}/`)
+  );
+  const nextEnvironment = environments.find((item) => item.id === nextEnvironmentId);
+  if (!currentEnvironment || !nextEnvironment) {
+    return null;
+  }
+
+  const suffix = filePath.slice(currentEnvironment.root.length);
+  return `${nextEnvironment.root}${suffix}`;
+}
+
 function DiffView(props: {
   before: string;
   after: string;
@@ -102,6 +120,7 @@ function ContentBlock(props: { content: string; emptyText: string }): JSX.Elemen
 
 export default function App(): JSX.Element {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>("");
   const [selectedPath, setSelectedPath] = useState<string>("");
   const [fileDetail, setFileDetail] = useState<FileDetail | null>(null);
   const [editorContent, setEditorContent] = useState("");
@@ -127,9 +146,21 @@ export default function App(): JSX.Element {
       preferredPath && data.files.some((file) => file.path === preferredPath)
         ? preferredPath
         : (data.selectedFile ?? "");
+    const environmentOptions = data.config.environments;
+    const derivedEnvironment =
+      environmentOptions.find(
+        (item) => nextPath && (nextPath === item.root || nextPath.startsWith(`${item.root}/`))
+      )?.id ||
+      environmentOptions[0]?.id ||
+      "";
 
     startTransition(() => {
       setBootstrap(data);
+      setSelectedEnvironment((current) =>
+        current && environmentOptions.some((item) => item.id === current)
+          ? current
+          : derivedEnvironment
+      );
       setSelectedPath(nextPath);
       if (!settingsSeeded || !preserveForm) {
         setGitForm({
@@ -337,6 +368,14 @@ export default function App(): JSX.Element {
   }
 
   const files: RepoFileSummary[] = bootstrap?.files ?? [];
+  const environmentOptions = bootstrap?.config.environments ?? [];
+  const activeEnvironment =
+    environmentOptions.find((item) => item.id === selectedEnvironment) ?? environmentOptions[0];
+  const visibleFiles = activeEnvironment
+    ? files.filter(
+        (file) => file.path === activeEnvironment.root || file.path.startsWith(`${activeEnvironment.root}/`)
+      )
+    : files;
   const repoReady = bootstrap?.repoStatus.ready ?? false;
 
   return (
@@ -346,7 +385,7 @@ export default function App(): JSX.Element {
           <p className="eyebrow">Git File Console</p>
           <h1>配置文件在线展示与提交</h1>
           <p className="hero-text">
-            仅展示 dev、sit、uat、prod 目录下的文件，自动换行展示内容，支持实时刷新、在线修改、提交并推送。
+            按环境切换查看配置文件，支持实时刷新、在线修改、提交并推送。
           </p>
         </div>
         <div className="hero-card">
@@ -369,6 +408,43 @@ export default function App(): JSX.Element {
             </button>
           </div>
 
+          <label className="form-row">
+            <span>当前环境</span>
+            <select
+              value={activeEnvironment?.id ?? ""}
+              onChange={(event) => {
+                const nextEnvironmentId = event.target.value;
+                setSelectedEnvironment(nextEnvironmentId);
+                const nextPath = selectedPath
+                  ? replaceEnvironmentRoot(selectedPath, environmentOptions, nextEnvironmentId)
+                  : null;
+                if (nextPath && files.some((file) => file.path === nextPath)) {
+                  setSelectedPath(nextPath);
+                  return;
+                }
+
+                const nextEnvironment = environmentOptions.find(
+                  (item) => item.id === nextEnvironmentId
+                );
+                const fallbackPath =
+                  nextEnvironment
+                    ? files.find(
+                        (file) =>
+                          file.path === nextEnvironment.root ||
+                          file.path.startsWith(`${nextEnvironment.root}/`)
+                      )?.path ?? ""
+                    : "";
+                setSelectedPath(fallbackPath);
+              }}
+            >
+              {environmentOptions.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <div className="repo-meta">
             <div>
               <span className="meta-label">远程仓库</span>
@@ -381,7 +457,7 @@ export default function App(): JSX.Element {
             <div>
               <span className="meta-label">展示目录</span>
               <span className="meta-value">
-                {bootstrap?.config.visibleRoots?.join(" / ") || "dev / sit / uat / prod"}
+                {activeEnvironment?.root || bootstrap?.config.visibleRoots?.join(" / ") || "-"}
               </span>
             </div>
             <div>
@@ -395,10 +471,10 @@ export default function App(): JSX.Element {
           ) : null}
 
           <div className="file-list">
-            {files.length === 0 ? (
+            {visibleFiles.length === 0 ? (
               <div className="empty-block">仓库中还没有可展示的文本文件</div>
             ) : (
-              files.map((file) => (
+              visibleFiles.map((file) => (
                 <button
                   key={file.path}
                   className={`file-item ${selectedPath === file.path ? "file-item--active" : ""}`}

@@ -23,11 +23,18 @@ export interface RepoStatus {
   lastSyncedAt: string | null;
 }
 
+export interface RepoEnvironmentOption {
+  id: string;
+  label: string;
+  root: string;
+}
+
 export interface BootstrapResponse {
   config: {
     remoteUrl: string;
     branch: string;
     defaultFile: string;
+    environments: RepoEnvironmentOption[];
     visibleRoots: string[];
     port: number;
   };
