@@ -24,6 +24,13 @@ interface FileTreeNode {
   file?: RepoFileSummary;
 }
 
+interface NamespaceOption {
+  id: string;
+  label: string;
+}
+
+const ROOT_NAMESPACE_ID = "__root__";
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     headers: {
@@ -64,38 +71,136 @@ function formatSize(size: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+function splitPathSegments(value: string): string[] {
+  return normalizePath(value).split("/").filter(Boolean);
+}
+
+function getPathWithinRoot(filePath: string, root: string): string | null {
+  const fileSegments = splitPathSegments(filePath);
+  const rootSegments = splitPathSegments(root);
+  if (!fileSegments.length || !rootSegments.length || fileSegments.length < rootSegments.length) {
+    return null;
+  }
+
+  for (let start = 0; start <= fileSegments.length - rootSegments.length; start += 1) {
+    const matches = rootSegments.every(
+      (segment, index) => fileSegments[start + index] === segment
+    );
+    if (matches) {
+      return fileSegments.slice(start + rootSegments.length).join("/");
+    }
+  }
+
+  return null;
+}
+
+function getNamespaceIdForFile(filePath: string, environmentRoot: string): string | null {
+  const relativePath = getPathWithinRoot(filePath, environmentRoot);
+  if (relativePath === null) {
+    return null;
+  }
+
+  const segments = splitPathSegments(relativePath);
+  if (segments.length <= 1) {
+    return ROOT_NAMESPACE_ID;
+  }
+
+  return segments[0];
+}
+
+function getNamespaceOptions(
+  files: RepoFileSummary[],
+  environmentRoot: string
+): NamespaceOption[] {
+  const namespaces = new Map<string, NamespaceOption>();
+
+  for (const file of files) {
+    const namespaceId = getNamespaceIdForFile(file.path, environmentRoot);
+    if (!namespaceId) {
+      continue;
+    }
+
+    if (!namespaces.has(namespaceId)) {
+      namespaces.set(namespaceId, {
+        id: namespaceId,
+        label: namespaceId === ROOT_NAMESPACE_ID ? "根目录" : namespaceId
+      });
+    }
+  }
+
+  return Array.from(namespaces.values()).sort((left, right) => {
+    if (left.id === ROOT_NAMESPACE_ID) {
+      return -1;
+    }
+    if (right.id === ROOT_NAMESPACE_ID) {
+      return 1;
+    }
+    return left.label.localeCompare(right.label, "zh-CN");
+  });
+}
+
+function getPathWithinNamespace(
+  filePath: string,
+  environmentRoot: string,
+  namespaceId: string
+): string | null {
+  const relativePath = getPathWithinRoot(filePath, environmentRoot);
+  if (relativePath === null) {
+    return null;
+  }
+
+  const segments = splitPathSegments(relativePath);
+  if (namespaceId === ROOT_NAMESPACE_ID) {
+    return segments.length <= 1 ? relativePath : null;
+  }
+
+  if (segments.length <= 1 || segments[0] !== namespaceId) {
+    return null;
+  }
+
+  return segments.slice(1).join("/");
+}
+
 function replaceEnvironmentRoot(
   filePath: string,
   environments: RepoEnvironmentOption[],
   nextEnvironmentId: string
 ): string | null {
   const currentEnvironment = environments.find(
-    (item) => filePath === item.root || filePath.startsWith(`${item.root}/`)
+    (item) => getPathWithinRoot(filePath, item.root) !== null
   );
   const nextEnvironment = environments.find((item) => item.id === nextEnvironmentId);
   if (!currentEnvironment || !nextEnvironment) {
     return null;
   }
 
-  const suffix = filePath.slice(currentEnvironment.root.length);
-  return `${nextEnvironment.root}${suffix}`;
+  const suffix = getPathWithinRoot(filePath, currentEnvironment.root);
+  if (suffix === null) {
+    return null;
+  }
+
+  return suffix ? `${nextEnvironment.root}/${suffix}` : nextEnvironment.root;
 }
 
-function buildFileTree(files: RepoFileSummary[], root: string): FileTreeNode[] {
+function buildFileTree(
+  files: RepoFileSummary[],
+  resolveRelativePath: (file: RepoFileSummary) => string | null,
+  treeId: string
+): FileTreeNode[] {
   const rootNode: FileTreeNode = {
-    id: root,
-    name: root.split("/").pop() || root,
-    path: root,
+    id: treeId,
+    name: treeId.split("/").pop() || treeId,
+    path: treeId,
     kind: "directory",
     children: []
   };
 
   for (const file of files) {
-    const relativePath = file.path.startsWith(`${root}/`)
-      ? file.path.slice(root.length + 1)
-      : file.path === root
-        ? ""
-        : file.path;
+    const relativePath = resolveRelativePath(file);
     if (!relativePath) {
       continue;
     }
@@ -112,9 +217,9 @@ function buildFileTree(files: RepoFileSummary[], root: string): FileTreeNode[] {
 
       if (!child) {
         child = {
-          id: nextPath,
+          id: isFile ? file.path : nextPath,
           name: segment,
-          path: nextPath,
+          path: isFile ? file.path : nextPath,
           kind: isFile ? "file" : "directory",
           children: [],
           file: isFile ? file : undefined
@@ -231,6 +336,7 @@ function ContentBlock(props: { content: string; emptyText: string }): JSX.Elemen
 export default function App(): JSX.Element {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>("");
+  const [selectedNamespace, setSelectedNamespace] = useState<string>("");
   const [selectedPath, setSelectedPath] = useState<string>("");
   const [fileDetail, setFileDetail] = useState<FileDetail | null>(null);
   const [editorContent, setEditorContent] = useState("");
@@ -256,11 +362,23 @@ export default function App(): JSX.Element {
         : (data.selectedFile ?? "");
     const environmentOptions = data.config.environments;
     const derivedEnvironment =
-      environmentOptions.find(
-        (item) => nextPath && (nextPath === item.root || nextPath.startsWith(`${item.root}/`))
-      )?.id ||
+      environmentOptions.find((item) => nextPath && getPathWithinRoot(nextPath, item.root) !== null)
+        ?.id ||
       environmentOptions[0]?.id ||
       "";
+    const derivedEnvironmentRoot =
+      environmentOptions.find((item) => item.id === derivedEnvironment)?.root ?? "";
+    const derivedNamespace =
+      (nextPath && derivedEnvironmentRoot
+        ? getNamespaceIdForFile(nextPath, derivedEnvironmentRoot)
+        : null) ??
+      ROOT_NAMESPACE_ID;
+    const namespaceOptions = derivedEnvironmentRoot
+      ? getNamespaceOptions(
+          data.files.filter((file) => getPathWithinRoot(file.path, derivedEnvironmentRoot) !== null),
+          derivedEnvironmentRoot
+        )
+      : [];
 
     startTransition(() => {
       setBootstrap(data);
@@ -268,6 +386,13 @@ export default function App(): JSX.Element {
         current && environmentOptions.some((item) => item.id === current)
           ? current
           : derivedEnvironment
+      );
+      setSelectedNamespace((current) =>
+        current && namespaceOptions.some((item) => item.id === current)
+          ? current
+          : (namespaceOptions.find((item) => item.id === derivedNamespace)?.id ??
+            namespaceOptions[0]?.id ??
+            "")
       );
       setSelectedPath(nextPath);
       if (!settingsSeeded || !preserveForm) {
@@ -476,12 +601,34 @@ export default function App(): JSX.Element {
   const environmentOptions = bootstrap?.config.environments ?? [];
   const activeEnvironment =
     environmentOptions.find((item) => item.id === selectedEnvironment) ?? environmentOptions[0];
-  const visibleFiles = activeEnvironment
-    ? files.filter(
-        (file) => file.path === activeEnvironment.root || file.path.startsWith(`${activeEnvironment.root}/`)
-      )
+  const environmentFiles = activeEnvironment
+    ? files.filter((file) => getPathWithinRoot(file.path, activeEnvironment.root) !== null)
     : files;
-  const fileTree = activeEnvironment ? buildFileTree(visibleFiles, activeEnvironment.root) : [];
+  const namespaceOptions = activeEnvironment
+    ? getNamespaceOptions(environmentFiles, activeEnvironment.root)
+    : [];
+  const activeNamespace =
+    namespaceOptions.find((item) => item.id === selectedNamespace) ?? namespaceOptions[0] ?? null;
+  const visibleFiles =
+    activeEnvironment && activeNamespace
+      ? environmentFiles.filter(
+          (file) => getPathWithinNamespace(file.path, activeEnvironment.root, activeNamespace.id) !== null
+        )
+      : environmentFiles;
+  const fileTree =
+    activeEnvironment && activeNamespace
+      ? buildFileTree(
+          visibleFiles,
+          (file) => getPathWithinNamespace(file.path, activeEnvironment.root, activeNamespace.id),
+          `${activeEnvironment.root}/${activeNamespace.id}`
+        )
+      : activeEnvironment
+        ? buildFileTree(
+            environmentFiles,
+            (file) => getPathWithinRoot(file.path, activeEnvironment.root),
+            activeEnvironment.root
+          )
+        : [];
   const repoReady = bootstrap?.repoStatus.ready ?? false;
 
   return (
@@ -521,23 +668,46 @@ export default function App(): JSX.Element {
               onChange={(event) => {
                 const nextEnvironmentId = event.target.value;
                 setSelectedEnvironment(nextEnvironmentId);
-                const nextPath = selectedPath
+                const nextEnvironment = environmentOptions.find(
+                  (item) => item.id === nextEnvironmentId
+                );
+                const nextEnvironmentFiles = nextEnvironment
+                  ? files.filter((file) => getPathWithinRoot(file.path, nextEnvironment.root) !== null)
+                  : [];
+                const nextNamespaceOptions = nextEnvironment
+                  ? getNamespaceOptions(nextEnvironmentFiles, nextEnvironment.root)
+                  : [];
+                const replacedPath = selectedPath
                   ? replaceEnvironmentRoot(selectedPath, environmentOptions, nextEnvironmentId)
+                  : null;
+                const replacedNamespace =
+                  replacedPath && nextEnvironment
+                    ? getNamespaceIdForFile(replacedPath, nextEnvironment.root)
+                    : null;
+                const nextNamespaceId =
+                  (replacedNamespace &&
+                  nextNamespaceOptions.some((item) => item.id === replacedNamespace)
+                    ? replacedNamespace
+                    : null) ??
+                  nextNamespaceOptions[0]?.id ??
+                  "";
+                setSelectedNamespace(nextNamespaceId);
+                const nextPath = selectedPath
+                  ? replacedPath
                   : null;
                 if (nextPath && files.some((file) => file.path === nextPath)) {
                   setSelectedPath(nextPath);
                   return;
                 }
 
-                const nextEnvironment = environmentOptions.find(
-                  (item) => item.id === nextEnvironmentId
-                );
                 const fallbackPath =
                   nextEnvironment
                     ? files.find(
                         (file) =>
-                          file.path === nextEnvironment.root ||
-                          file.path.startsWith(`${nextEnvironment.root}/`)
+                          getPathWithinRoot(file.path, nextEnvironment.root) !== null &&
+                          (!nextNamespaceId ||
+                            getPathWithinNamespace(file.path, nextEnvironment.root, nextNamespaceId) !==
+                              null)
                       )?.path ?? ""
                     : "";
                 setSelectedPath(fallbackPath);
@@ -551,6 +721,49 @@ export default function App(): JSX.Element {
             </select>
           </label>
 
+          {activeEnvironment ? (
+            <label className="form-row">
+              <span>Namespace</span>
+              <select
+                value={activeNamespace?.id ?? ""}
+                onChange={(event) => {
+                  const nextNamespaceId = event.target.value;
+                  setSelectedNamespace(nextNamespaceId);
+                  const nextPath =
+                    selectedPath &&
+                    activeEnvironment &&
+                    getPathWithinNamespace(selectedPath, activeEnvironment.root, nextNamespaceId) !==
+                      null
+                      ? selectedPath
+                      : "";
+                  if (nextPath) {
+                    setSelectedPath(nextPath);
+                    return;
+                  }
+
+                  const fallbackPath =
+                    activeEnvironment
+                      ? files.find(
+                          (file) =>
+                            getPathWithinNamespace(
+                              file.path,
+                              activeEnvironment.root,
+                              nextNamespaceId
+                            ) !== null
+                        )?.path ?? ""
+                      : "";
+                  setSelectedPath(fallbackPath);
+                }}
+              >
+                {namespaceOptions.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+
           <div className="repo-meta">
             <div>
               <span className="meta-label">远程仓库</span>
@@ -563,7 +776,11 @@ export default function App(): JSX.Element {
             <div>
               <span className="meta-label">展示目录</span>
               <span className="meta-value">
-                {activeEnvironment?.root || bootstrap?.config.visibleRoots?.join(" / ") || "-"}
+                {activeEnvironment
+                  ? activeNamespace && activeNamespace.id !== ROOT_NAMESPACE_ID
+                    ? `${activeEnvironment.root}/${activeNamespace.id}`
+                    : activeEnvironment.root
+                  : bootstrap?.config.visibleRoots?.join(" / ") || "-"}
               </span>
             </div>
             <div>
