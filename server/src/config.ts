@@ -39,6 +39,7 @@ const DEFAULT_APP_CONFIG: AppConfig = {
     branch: "main",
     configRoot: DEFAULT_CONFIG_ROOT,
     allowedExtensions: [
+      "",
       ".json",
       ".yaml",
       ".yml",

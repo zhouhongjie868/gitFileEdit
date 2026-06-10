@@ -23,14 +23,6 @@ import type {
 } from "./types";
 
 const execFileAsync = promisify(execFile);
-const COMMON_TEXT_NAMES = new Set([
-  "Dockerfile",
-  "Makefile",
-  ".env",
-  ".gitignore",
-  ".npmrc"
-]);
-
 function logRepoDebug(scope: string, payload: Record<string, unknown>): void {
   console.log(`[repo-debug] ${scope}`, JSON.stringify(payload, null, 2));
 }
@@ -247,33 +239,38 @@ export async function syncRepo(
   });
 }
 
-function isAllowedFile(filePath: string, allowedExtensions: string[]): boolean {
-  const extension = path.extname(filePath).toLowerCase();
-  const baseName = path.basename(filePath);
-  return (
-    allowedExtensions.includes(extension) ||
-    COMMON_TEXT_NAMES.has(baseName) ||
-    baseName.startsWith(".env")
-  );
-}
-
 async function collectFilesystemStats(
   repoPath: string,
   repoRelativePath: string
-): Promise<RepoFileSummary | null> {
+): Promise<RepoFileSummary> {
   const filePath = path.resolve(repoPath, repoRelativePath);
   try {
     const fileStats = await stat(filePath);
-    if (!fileStats.isFile()) {
-      return null;
+    if (fileStats.isFile()) {
+      return {
+        path: repoRelativePath,
+        size: fileStats.size,
+        modifiedAt: fileStats.mtime.toISOString()
+      };
     }
+
+    logRepoDebug("collectFilesystemStats.notFile", {
+      repoRelativePath
+    });
     return {
       path: repoRelativePath,
-      size: fileStats.size,
-      modifiedAt: fileStats.mtime.toISOString()
+      size: 0,
+      modifiedAt: new Date(0).toISOString()
     };
   } catch {
-    return null;
+    logRepoDebug("collectFilesystemStats.statFailed", {
+      repoRelativePath
+    });
+    return {
+      path: repoRelativePath,
+      size: 0,
+      modifiedAt: new Date(0).toISOString()
+    };
   }
 }
 
@@ -295,13 +292,10 @@ export async function listRepoFiles(config: AppConfig): Promise<RepoFileSummary[
   const visibleCandidates = [...trackedFiles, ...untrackedFiles].filter((item) =>
     isInVisibleRoots(item, visibleRoots)
   );
-  const allowedCandidates = visibleCandidates.filter((item) =>
-    isAllowedFile(item, config.repo.allowedExtensions)
+  const extensionFilteredOut = visibleCandidates.filter(
+    (item) => !config.repo.allowedExtensions.includes(path.extname(item).toLowerCase())
   );
-
-  const candidates = new Set(
-    allowedCandidates
-  );
+  const candidates = new Set(visibleCandidates);
 
   const files = await Promise.all(
     Array.from(candidates)
@@ -309,7 +303,7 @@ export async function listRepoFiles(config: AppConfig): Promise<RepoFileSummary[
       .map((filePath) => collectFilesystemStats(repoPath, filePath))
   );
 
-  const result = files.filter((file): file is RepoFileSummary => Boolean(file));
+  const result = files;
   const filesByRoot = Object.fromEntries(
     visibleRoots.map((root) => [
       root,
@@ -323,10 +317,11 @@ export async function listRepoFiles(config: AppConfig): Promise<RepoFileSummary[
     trackedCount: trackedFiles.length,
     untrackedCount: untrackedFiles.length,
     visibleCandidateCount: visibleCandidates.length,
-    allowedCandidateCount: allowedCandidates.length,
+    extensionFilteredOutCount: extensionFilteredOut.length,
     resultCount: result.length,
     filesByRoot,
     sampleVisibleCandidates: visibleCandidates.slice(0, 20),
+    sampleExtensionFilteredOut: extensionFilteredOut.slice(0, 20),
     sampleResultFiles: result.slice(0, 20).map((file) => file.path)
   });
 
