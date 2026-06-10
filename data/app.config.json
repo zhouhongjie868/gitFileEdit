@@ -7,7 +7,7 @@
     "remoteUrl": "http://12.99.223.130:30005/enterprise/LMA/aifp-config-tob.git",
     "branch": "main",
     "defaultFile": "dev/app.yaml",
-    "visibleRoots": ["dev", "sit", "uat", "prod"],
+    "visibleRoots": ["nacos-config/config/dev", "nacos-config/config/sit", "nacos-config/config/uat", "nacos-config/config/prod"],
     "allowedExtensions": [
       ".json",
       ".yaml",
