@@ -1,4 +1,5 @@
 import path from "node:path";
+import { Buffer } from "node:buffer";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -52,30 +53,6 @@ function normalizeAllowedFilePath(config: AppConfig, repoPath: string, filePath:
   return repoRelativePath;
 }
 
-function buildAuthenticatedRemoteUrl(
-  remoteUrl: string,
-  auth: {
-    username?: string;
-    password?: string;
-  }
-): string {
-  try {
-    const url = new URL(remoteUrl);
-    if (url.protocol === "http:" || url.protocol === "https:") {
-      if (auth.username) {
-        url.username = auth.username;
-      }
-      if (auth.password) {
-        url.password = auth.password;
-      }
-      return url.toString();
-    }
-  } catch {
-    return remoteUrl;
-  }
-  return remoteUrl;
-}
-
 function getConfiguredRepoAuth(config: AppConfig): {
   username?: string;
   password?: string;
@@ -89,8 +66,14 @@ function getConfiguredRepoAuth(config: AppConfig): {
   };
 }
 
-function getAuthenticatedRepoUrl(config: AppConfig): string {
-  return buildAuthenticatedRemoteUrl(config.repo.remoteUrl, getConfiguredRepoAuth(config));
+function getGitAuthArgs(config: AppConfig): string[] {
+  const auth = getConfiguredRepoAuth(config);
+  if (!auth.username || !auth.password) {
+    return [];
+  }
+
+  const token = Buffer.from(`${auth.username}:${auth.password}`, "utf8").toString("base64");
+  return ["-c", `http.extraHeader=Authorization: Basic ${token}`];
 }
 
 function getRemoteUrlSummary(remoteUrl: string): {
@@ -111,7 +94,10 @@ function getRemoteUrlSummary(remoteUrl: string): {
   }
 }
 
-function buildGitArgsWithManagedCredentials(args: string[]): string[] {
+function buildGitArgsWithManagedCredentials(
+  config: AppConfig,
+  args: string[]
+): string[] {
   return [
     "-c",
     "credential.helper=",
@@ -119,6 +105,7 @@ function buildGitArgsWithManagedCredentials(args: string[]): string[] {
     "core.askPass=",
     "-c",
     "credential.interactive=never",
+    ...getGitAuthArgs(config),
     ...args
   ];
 }
@@ -245,7 +232,7 @@ export async function syncRepo(
   _runtime: RuntimeState
 ): Promise<void> {
   const repoPath = resolveRepoPath(config);
-  const remoteUrl = getAuthenticatedRepoUrl(config);
+  const remoteUrl = config.repo.remoteUrl;
   const auth = getConfiguredRepoAuth(config);
   const remoteUrlSummary = getRemoteUrlSummary(remoteUrl);
   await mkdir(path.dirname(repoPath), { recursive: true });
@@ -260,7 +247,7 @@ export async function syncRepo(
       resolvedRemoteUsername: remoteUrlSummary.username
     });
     await runGit(
-      buildGitArgsWithManagedCredentials([
+      buildGitArgsWithManagedCredentials(config, [
         "clone",
         "--branch",
         config.repo.branch,
@@ -286,7 +273,7 @@ export async function syncRepo(
     resolvedRemoteUsername: remoteUrlSummary.username
   });
   await runGit(
-    buildGitArgsWithManagedCredentials([
+    buildGitArgsWithManagedCredentials(config, [
       "pull",
       "--rebase",
       remoteUrl,
@@ -498,7 +485,7 @@ export async function commitAndPushFile(
   }
 
   const auth = getConfiguredRepoAuth(config);
-  const pushRemoteUrl = getAuthenticatedRepoUrl(config);
+  const pushRemoteUrl = config.repo.remoteUrl;
   const remoteUrlSummary = getRemoteUrlSummary(pushRemoteUrl);
 
   logRepoDebug("commitAndPushFile.push.start", {
@@ -507,7 +494,8 @@ export async function commitAndPushFile(
     path: repoRelativePath,
     username: auth.username || null,
     resolvedRemoteHost: remoteUrlSummary.host,
-    resolvedRemoteUsername: remoteUrlSummary.username
+    resolvedRemoteUsername: remoteUrlSummary.username,
+    authMode: "http.extraHeader"
   });
 
   await runGit(["add", "--", repoRelativePath], { cwd: repoPath });
@@ -523,7 +511,7 @@ export async function commitAndPushFile(
     { cwd: repoPath }
   );
   await runGit(
-    buildGitArgsWithManagedCredentials([
+    buildGitArgsWithManagedCredentials(config, [
       "push",
       pushRemoteUrl,
       `HEAD:${config.repo.branch}`
