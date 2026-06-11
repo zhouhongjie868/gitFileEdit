@@ -288,15 +288,34 @@ export async function syncRepo(
   });
   await runGit(
     buildGitArgsWithManagedCredentials(config, [
-      "pull",
-      "--rebase",
+      "fetch",
+      "--prune",
       remoteUrl,
       config.repo.branch
     ]),
     {
-    cwd: repoPath
+      cwd: repoPath
     }
   );
+  await runGit(
+    ["checkout", config.repo.branch],
+    {
+      cwd: repoPath
+    }
+  ).catch(() => "");
+  await runGit(
+    ["merge", "--ff-only", `FETCH_HEAD`],
+    {
+      cwd: repoPath
+    }
+  ).catch((error) => {
+    logRepoDebug("syncRepo.merge.skip", {
+      repoPath,
+      branch: config.repo.branch,
+      error: (error as Error).message
+    });
+    return "";
+  });
   logRepoDebug("syncRepo.pull.done", {
     repoPath,
     branch: config.repo.branch
