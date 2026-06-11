@@ -27,11 +27,10 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY scripts/configure-git-global.cjs ./scripts/configure-git-global.cjs
+COPY scripts/docker-entrypoint.cjs ./scripts/docker-entrypoint.cjs
 COPY data/app.config.json ./data/app.config.json
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV NODE_ENV=production
 ENV PORT=8090
 EXPOSE 8090
-ENTRYPOINT ["/bin/sh", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["node", "/app/scripts/docker-entrypoint.cjs"]
 CMD ["node", "dist/server/index.js"]
