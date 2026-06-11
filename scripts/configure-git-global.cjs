@@ -1,9 +1,10 @@
 const { execFileSync } = require("node:child_process");
-const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const configPath = path.resolve("/app/data/app.config.json");
+const configPath =
+  process.env.APP_CONFIG_PATH || path.resolve(__dirname, "../data/app.config.json");
 
 function runGitConfig(args) {
   execFileSync("git", args, {
@@ -13,6 +14,13 @@ function runGitConfig(args) {
 
 function main() {
   const homeDir = process.env.HOME || os.homedir() || "/root";
+  if (!existsSync(configPath)) {
+    console.warn(
+      `[docker-entrypoint] skip git global auth init: config file not found at ${configPath}`
+    );
+    return;
+  }
+
   const raw = readFileSync(configPath, "utf8");
   const config = JSON.parse(raw);
   const remoteUrl = String(config?.repo?.remoteUrl ?? "").trim();
@@ -47,9 +55,8 @@ function main() {
 try {
   main();
 } catch (error) {
-  console.error(
+  console.warn(
     "[docker-entrypoint] failed to configure git global credentials:",
     error instanceof Error ? error.message : error
   );
-  process.exit(1);
 }
