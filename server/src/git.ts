@@ -247,6 +247,7 @@ export async function syncRepo(
 ): Promise<void> {
   const repoPath = resolveRepoPath(config);
   const remoteUrl = config.repo.remoteUrl;
+  const remoteTrackingRef = `refs/remotes/origin/${config.repo.branch}`;
   const auth = getConfiguredRepoAuth(config);
   const remoteUrlSummary = getRemoteUrlSummary(remoteUrl);
   await mkdir(path.dirname(repoPath), { recursive: true });
@@ -291,7 +292,7 @@ export async function syncRepo(
       "fetch",
       "--prune",
       remoteUrl,
-      config.repo.branch
+      `+refs/heads/${config.repo.branch}:${remoteTrackingRef}`
     ]),
     {
       cwd: repoPath
@@ -304,7 +305,7 @@ export async function syncRepo(
     }
   ).catch(() => "");
   await runGit(
-    ["merge", "--ff-only", `FETCH_HEAD`],
+    ["merge", "--ff-only", remoteTrackingRef],
     {
       cwd: repoPath
     }
@@ -318,7 +319,8 @@ export async function syncRepo(
   });
   logRepoDebug("syncRepo.pull.done", {
     repoPath,
-    branch: config.repo.branch
+    branch: config.repo.branch,
+    remoteTrackingRef
   });
 }
 
