@@ -1,0 +1,31 @@
+{
+  "server": {
+    "port": 8090
+  },
+  "repo": {
+    "localPath": "./data/repo",
+    "remoteUrl": "https://git.example.com/your-group/your-repo.git",
+    "branch": "main",
+    "configRoot": "nacos-config/config",
+    "allowedExtensions": [
+      "",
+      ".json",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".ini",
+      ".conf",
+      ".properties",
+      ".env",
+      ".xml",
+      ".txt",
+      ".md"
+    ],
+    "auth": {
+      "username": "",
+      "password": ""
+    },
+    "commitMessagePrefix": "config: ",
+    "cloneOnStart": true
+  }
+}

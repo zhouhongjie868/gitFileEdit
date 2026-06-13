@@ -4,5 +4,4 @@ data/repo
 data/test-remote.git
 data/test-seed
 data/runtime.json
-data/app.config.json
 data/users.json
