@@ -1,6 +1,7 @@
 import { diffLines } from "diff";
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useEffect, useState, type FormEvent } from "react";
 import type {
+  AuthUser,
   BootstrapResponse,
   FileDetail,
   GitSettingsSummary,
@@ -27,6 +28,10 @@ interface FileTreeNode {
 interface NamespaceOption {
   id: string;
   label: string;
+}
+
+interface AuthResponse {
+  user: AuthUser;
 }
 
 function cn(...classes: Array<string | false | null | undefined>): string {
@@ -70,12 +75,24 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     try {
       const payload = JSON.parse(fallbackText) as { error?: string };
       throw new Error(payload.error || "请求失败");
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && payloadHasErrorMessage(fallbackText)) {
+        throw error;
+      }
       throw new Error(fallbackText || "请求失败");
     }
   }
 
   return (await response.json()) as T;
+}
+
+function payloadHasErrorMessage(value: string): boolean {
+  try {
+    const payload = JSON.parse(value) as { error?: unknown };
+    return typeof payload.error === "string";
+  } catch {
+    return false;
+  }
 }
 
 function formatTime(isoTime: string | null): string {
@@ -420,6 +437,13 @@ export default function App(): JSX.Element {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loginForm, setLoginForm] = useState({
+    username: "",
+    password: ""
+  });
+  const [loggingIn, setLoggingIn] = useState(false);
 
   async function refreshBootstrap(preferredPath?: string, preserveForm = true): Promise<void> {
     const data = await requestJson<BootstrapResponse>("/api/bootstrap");
@@ -500,10 +524,18 @@ export default function App(): JSX.Element {
     void (async () => {
       try {
         setLoading(true);
+        const authResponse = await fetch("/api/auth/me");
+        if (!authResponse.ok) {
+          setAuthUser(null);
+          return;
+        }
+        const authPayload = (await authResponse.json()) as AuthResponse;
+        setAuthUser(authPayload.user);
         await refreshBootstrap(undefined, false);
       } catch (fetchError) {
         setError((fetchError as Error).message);
       } finally {
+        setAuthChecked(true);
         setLoading(false);
       }
     })();
@@ -519,6 +551,10 @@ export default function App(): JSX.Element {
   }, [selectedPath]);
 
   useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+
     const stream = new EventSource("/api/stream");
 
     stream.addEventListener("repo-changed", () => {
@@ -542,7 +578,7 @@ export default function App(): JSX.Element {
     return () => {
       stream.close();
     };
-  }, [selectedPath, editorDirty, settingsSeeded]);
+  }, [authUser, selectedPath, editorDirty, settingsSeeded]);
 
   async function saveGitSettings(): Promise<void> {
     const response = await requestJson<{ gitSettings: GitSettingsSummary }>("/api/settings/git", {
@@ -665,6 +701,43 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setLoggingIn(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      const payload = await requestJson<AuthResponse>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify(loginForm)
+      });
+      setAuthUser(payload.user);
+      setLoginForm({
+        username: "",
+        password: ""
+      });
+      await refreshBootstrap(undefined, false);
+    } catch (loginError) {
+      setError((loginError as Error).message);
+    } finally {
+      setLoggingIn(false);
+      setAuthChecked(true);
+    }
+  }
+
+  async function logoutCurrentUser(): Promise<void> {
+    await requestJson<{ ok: boolean }>("/api/auth/logout", {
+      method: "POST"
+    }).catch(() => ({ ok: true }));
+    setAuthUser(null);
+    setBootstrap(null);
+    setSelectedPath("");
+    setFileDetail(null);
+    setEditorContent("");
+    setEditorDirty(false);
+  }
+
   const files: RepoFileSummary[] = bootstrap?.files ?? [];
   const environmentOptions = bootstrap?.config.environments ?? [];
   const activeEnvironment =
@@ -712,6 +785,68 @@ export default function App(): JSX.Element {
         : [];
   const repoReady = bootstrap?.repoStatus.ready ?? false;
 
+  if (!authChecked || loading) {
+    return <div className="p-7 text-[#43555d]">正在加载...</div>;
+  }
+
+  if (!authUser) {
+    return (
+      <div className="grid min-h-screen place-items-center p-4">
+        <form
+          className={cn(panelClass, "w-full max-w-[420px]")}
+          onSubmit={(event) => void submitLogin(event)}
+        >
+          <p className="mb-2 text-xs font-bold uppercase tracking-[0.16em] text-[#5a7a72]">
+            Git File Console
+          </p>
+          <h1 className="m-0 text-3xl leading-tight">登录后修改配置</h1>
+          <div className="mt-6 grid gap-4">
+            <label className={formRowClass}>
+              <span className={formLabelClass}>账号</span>
+              <input
+                className={inputClass}
+                autoComplete="username"
+                value={loginForm.username}
+                onChange={(event) =>
+                  setLoginForm((current) => ({
+                    ...current,
+                    username: event.target.value
+                  }))
+                }
+              />
+            </label>
+            <label className={formRowClass}>
+              <span className={formLabelClass}>密码</span>
+              <input
+                className={inputClass}
+                type="password"
+                autoComplete="current-password"
+                value={loginForm.password}
+                onChange={(event) =>
+                  setLoginForm((current) => ({
+                    ...current,
+                    password: event.target.value
+                  }))
+                }
+              />
+            </label>
+            {error ? (
+              <div className="rounded-2xl bg-[#c94a35]/10 px-3.5 py-3 text-sm text-[#8d3322]">
+                {error}
+              </div>
+            ) : null}
+            <button
+              className={primaryButtonClass}
+              disabled={!loginForm.username || !loginForm.password || loggingIn}
+            >
+              {loggingIn ? "登录中..." : "登录"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="p-4 sm:p-7">
       <header className="mb-6 flex flex-col items-start justify-between gap-6 xl:flex-row">
@@ -726,20 +861,31 @@ export default function App(): JSX.Element {
             按环境切换查看配置文件，支持实时刷新、在线修改、提交并推送。
           </p>
         </div>
-        <div className="flex min-w-[260px] items-center gap-3.5 rounded-[22px] border border-slate-900/10 bg-white/70 px-5 py-4 shadow-[0_24px_60px_rgba(54,77,80,0.1)]">
-          <span
-            className={cn(
-              "inline-block h-3 w-3 rounded-full",
-              repoReady
-                ? "bg-[#1d8c68] shadow-[0_0_0_6px_rgba(29,140,104,0.14)]"
-                : "bg-[#d1842f] shadow-[0_0_0_6px_rgba(209,132,47,0.14)]"
-            )}
-          />
-          <div>
-            <strong>{repoReady ? "仓库可用" : "仓库未就绪"}</strong>
-            <div className="mt-1.5 text-[#728188]">
-              上次同步 {formatTime(bootstrap?.repoStatus.lastSyncedAt ?? null)}
+        <div className="grid gap-3 sm:grid-cols-[minmax(260px,1fr)_auto]">
+          <div className="flex min-w-[260px] items-center gap-3.5 rounded-[22px] border border-slate-900/10 bg-white/70 px-5 py-4 shadow-[0_24px_60px_rgba(54,77,80,0.1)]">
+            <span
+              className={cn(
+                "inline-block h-3 w-3 rounded-full",
+                repoReady
+                  ? "bg-[#1d8c68] shadow-[0_0_0_6px_rgba(29,140,104,0.14)]"
+                  : "bg-[#d1842f] shadow-[0_0_0_6px_rgba(209,132,47,0.14)]"
+              )}
+            />
+            <div>
+              <strong>{repoReady ? "仓库可用" : "仓库未就绪"}</strong>
+              <div className="mt-1.5 text-[#728188]">
+                上次同步 {formatTime(bootstrap?.repoStatus.lastSyncedAt ?? null)}
+              </div>
             </div>
+          </div>
+          <div className="flex items-center gap-3 rounded-[22px] border border-slate-900/10 bg-white/70 px-5 py-4 shadow-[0_24px_60px_rgba(54,77,80,0.1)]">
+            <div>
+              <strong>{authUser.id}</strong>
+              <div className="mt-1.5 text-sm text-[#728188]">当前账号</div>
+            </div>
+            <button className={secondaryButtonClass} onClick={() => void logoutCurrentUser()}>
+              退出
+            </button>
           </div>
         </div>
       </header>

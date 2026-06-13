@@ -8,6 +8,10 @@ export interface GitSettingsSummary {
   commitMessagePrefix: string;
 }
 
+export interface AuthUser {
+  id: string;
+}
+
 export interface RepoStatus {
   ready: boolean;
   exists: boolean;
@@ -27,6 +31,7 @@ export interface RepoEnvironmentOption {
 }
 
 export interface BootstrapResponse {
+  user: AuthUser | null;
   config: {
     remoteUrl: string;
     branch: string;

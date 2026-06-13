@@ -22,6 +22,7 @@ import type {
   RepoStatus,
   RuntimeState
 } from "./types";
+import type { AuthUser } from "./types";
 
 const execFileAsync = promisify(execFile);
 function logRepoDebug(scope: string, payload: Record<string, unknown>): void {
@@ -66,17 +67,17 @@ function getConfiguredRepoAuth(config: AppConfig): {
   };
 }
 
-function getGitCommitIdentityArgs(config: AppConfig): string[] {
-  const username = config.repo.auth.username.trim();
-  if (!username) {
+function getGitCommitIdentityArgs(config: AppConfig, actor?: AuthUser): string[] {
+  const name = actor?.id?.trim() || config.repo.auth.username.trim();
+  if (!name) {
     return [];
   }
 
   return [
     "-c",
-    `user.name=${username}`,
+    `user.name=${name}`,
     "-c",
-    `user.email=${username}@local`
+    "user.email=git-file-edit@local"
   ];
 }
 
@@ -380,7 +381,11 @@ export async function listRepoFiles(config: AppConfig): Promise<RepoFileSummary[
   const extensionFilteredOut = visibleCandidates.filter(
     (item) => !config.repo.allowedExtensions.includes(path.extname(item).toLowerCase())
   );
-  const candidates = new Set(visibleCandidates);
+  const candidates = new Set(
+    visibleCandidates.filter((item) =>
+      config.repo.allowedExtensions.includes(path.extname(item).toLowerCase())
+    )
+  );
 
   const files = await Promise.all(
     Array.from(candidates)
@@ -514,13 +519,20 @@ export async function commitAndPushFile(
   input: {
     path: string;
     message: string;
+    actor?: AuthUser;
   }
 ): Promise<{ head: string; path: string }> {
   const repoPath = resolveRepoPath(config);
   const repoRelativePath = normalizeAllowedFilePath(config, repoPath, input.path);
   const detailMessage = input.message.trim();
   const prefix = config.repo.commitMessagePrefix || "";
-  const commitMessage = `${prefix}${detailMessage}`.trim();
+  const actorLines = input.actor
+    ? [`操作人：${input.actor.id}`]
+    : [];
+  const commitMessage = [
+    `${prefix}${detailMessage || "更新配置"}`.trim(),
+    ...actorLines
+  ].join("\n\n");
 
   const workingTreeStatus = await runGit(["status", "--porcelain", "--", repoRelativePath], {
     cwd: repoPath
@@ -546,7 +558,7 @@ export async function commitAndPushFile(
   await runGit(["add", "--", repoRelativePath], { cwd: repoPath });
   await runGit(
     [
-      ...getGitCommitIdentityArgs(config),
+      ...getGitCommitIdentityArgs(config, input.actor),
       "commit",
       "--no-gpg-sign",
       "-m",

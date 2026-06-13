@@ -22,6 +22,10 @@ export interface RuntimeState {
   lastSyncedAt: string | null;
 }
 
+export interface AuthUser {
+  id: string;
+}
+
 export interface RepoFileSummary {
   path: string;
   size: number;

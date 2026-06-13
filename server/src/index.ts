@@ -1,5 +1,6 @@
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { login, logout, me, requireAuth } from "./auth";
 import {
   getEnvironmentOptions,
   loadAppConfig,
@@ -64,6 +65,7 @@ async function buildBootstrapPayload() {
   });
 
   return {
+    user: null,
     config: {
       remoteUrl: config.repo.remoteUrl,
       branch: config.repo.branch,
@@ -100,9 +102,38 @@ async function initializeRepoOnStartup(): Promise<void> {
   }
 }
 
+app.post("/api/auth/login", async (request, response, next) => {
+  try {
+    await login(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/auth/me", async (request, response, next) => {
+  try {
+    await me(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/logout", async (request, response, next) => {
+  try {
+    await logout(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use("/api", requireAuth);
+
 app.get("/api/bootstrap", async (_request, response, next) => {
   try {
-    response.json(await buildBootstrapPayload());
+    response.json({
+      ...(await buildBootstrapPayload()),
+      user: _request.user
+    });
   } catch (error) {
     next(error);
   }
@@ -190,7 +221,8 @@ app.post("/api/commit", async (request, response, next) => {
     const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
     const result = await commitAndPushFile(config, runtime, {
       path: filePath,
-      message: detailMessage
+      message: detailMessage,
+      actor: request.user
     });
     await markLastSyncedAt(new Date().toISOString());
     await ensureWatcher();
