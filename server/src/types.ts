@@ -22,6 +22,10 @@ export interface RuntimeState {
   lastSyncedAt: string | null;
 }
 
+export interface AuthUser {
+  id: string;
+}
+
 export interface RepoFileSummary {
   path: string;
   size: number;
@@ -61,9 +65,26 @@ export interface FileDetail {
   content: string;
   remoteContent: string;
   headContent: string;
+  baseHead: string;
+  baseBlob: string | null;
+  remoteHead: string | null;
+  remoteBlob: string | null;
   isDirty: boolean;
   modifiedAt: string;
   lastCommit: CommitSnapshot | null;
+  history: CommitSnapshot[];
+}
+
+export interface FileConflictPayload {
+  type: "conflict";
+  message: string;
+  path: string;
+  baseHead: string;
+  remoteHead: string | null;
+  remoteBlob: string | null;
+  baseContent: string;
+  localContent: string;
+  remoteContent: string;
 }
 
 export interface GitSettingsSummary {

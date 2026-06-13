@@ -10,13 +10,17 @@
     "build:client": "vite build",
     "build:server": "tsc -p server/tsconfig.json",
     "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit",
+    "auth:create-user": "node scripts/create-user.cjs",
+    "test:setup-remote": "node scripts/setup-test-remote.cjs",
     "start": "node dist/server/index.js"
   },
   "dependencies": {
     "diff": "^7.0.0",
     "express": "^4.21.2",
+    "jsonc-parser": "^3.3.1",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/diff": "^7.0.1",
@@ -25,7 +29,10 @@
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
     "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.2",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"

@@ -9,4 +9,6 @@ services:
       - ./data:/app/data
     environment:
       PORT: "8090"
+      APP_SESSION_SECRET: "${APP_SESSION_SECRET:?set APP_SESSION_SECRET}"
+      APP_USERS_PATH: "/app/data/users.json"
     restart: unless-stopped

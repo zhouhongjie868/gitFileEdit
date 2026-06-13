@@ -1,5 +1,6 @@
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { login, logout, me, register, requireAuth } from "./auth";
 import {
   getEnvironmentOptions,
   loadAppConfig,
@@ -10,12 +11,15 @@ import {
   toGitSettingsSummary,
   updateCommitMessagePrefix
 } from "./config";
+import { ConfigFileValidationError } from "./fileValidation";
 import {
   commitAndPushFile,
+  FileConflictError,
   inspectRepo,
   listRepoFiles,
   readFileDetail,
   repoExists,
+  restoreFileToHistoryCommit,
   syncRepo,
   writeRepoFile
 } from "./git";
@@ -64,6 +68,7 @@ async function buildBootstrapPayload() {
   });
 
   return {
+    user: null,
     config: {
       remoteUrl: config.repo.remoteUrl,
       branch: config.repo.branch,
@@ -100,9 +105,46 @@ async function initializeRepoOnStartup(): Promise<void> {
   }
 }
 
+app.post("/api/auth/login", async (request, response, next) => {
+  try {
+    await login(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/register", async (request, response, next) => {
+  try {
+    await register(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/auth/me", async (request, response, next) => {
+  try {
+    await me(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/logout", async (request, response, next) => {
+  try {
+    await logout(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use("/api", requireAuth);
+
 app.get("/api/bootstrap", async (_request, response, next) => {
   try {
-    response.json(await buildBootstrapPayload());
+    response.json({
+      ...(await buildBootstrapPayload()),
+      user: _request.user
+    });
   } catch (error) {
     next(error);
   }
@@ -181,16 +223,28 @@ app.post("/api/repo/sync", async (_request, response, next) => {
 app.post("/api/commit", async (request, response, next) => {
   try {
     const filePath = String(request.body.path ?? "").trim();
+    const content = String(request.body.content ?? "");
     const detailMessage = String(request.body.message ?? "").trim();
+    const baseHead = String(request.body.baseHead ?? "").trim();
+    const baseBlob =
+      typeof request.body.baseBlob === "string" ? request.body.baseBlob : null;
     if (!filePath) {
       response.status(400).json({ error: "缺少文件路径" });
+      return;
+    }
+    if (!baseHead) {
+      response.status(400).json({ error: "缺少打开文件时的版本信息" });
       return;
     }
 
     const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
     const result = await commitAndPushFile(config, runtime, {
       path: filePath,
-      message: detailMessage
+      content,
+      message: detailMessage,
+      baseHead,
+      baseBlob,
+      actor: request.user
     });
     await markLastSyncedAt(new Date().toISOString());
     await ensureWatcher();
@@ -201,7 +255,53 @@ app.post("/api/commit", async (request, response, next) => {
     });
     response.json(result);
   } catch (error) {
-    lastRepoError = toErrorMessage(error);
+    if (!(error instanceof FileConflictError)) {
+      lastRepoError = toErrorMessage(error);
+    }
+    next(error);
+  }
+});
+
+app.post("/api/file/restore", async (request, response, next) => {
+  try {
+    const filePath = String(request.body.path ?? "").trim();
+    const hash = String(request.body.hash ?? "").trim();
+    const baseHead = String(request.body.baseHead ?? "").trim();
+    const baseBlob =
+      typeof request.body.baseBlob === "string" ? request.body.baseBlob : null;
+    if (!filePath) {
+      response.status(400).json({ error: "缺少文件路径" });
+      return;
+    }
+    if (!hash) {
+      response.status(400).json({ error: "缺少历史版本标识" });
+      return;
+    }
+    if (!baseHead) {
+      response.status(400).json({ error: "缺少打开文件时的版本信息" });
+      return;
+    }
+
+    const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
+    const result = await restoreFileToHistoryCommit(config, runtime, {
+      path: filePath,
+      hash,
+      baseHead,
+      baseBlob,
+      actor: request.user
+    });
+    await markLastSyncedAt(new Date().toISOString());
+    await ensureWatcher();
+    lastRepoError = null;
+    notifier.broadcast("repo-changed", {
+      relativePath: result.path,
+      eventType: "commit"
+    });
+    response.json(result);
+  } catch (error) {
+    if (!(error instanceof FileConflictError)) {
+      lastRepoError = toErrorMessage(error);
+    }
     next(error);
   }
 });
@@ -218,6 +318,21 @@ app.get("*", (_request, response) => {
 
 app.use(
   (error: unknown, request: Request, response: Response, _next: NextFunction) => {
+    if (error instanceof FileConflictError) {
+      response.status(error.statusCode).json(error.payload);
+      return;
+    }
+
+    if (error instanceof ConfigFileValidationError) {
+      response.status(error.statusCode).json({
+        type: error.type,
+        fileType: error.fileType,
+        message: error.message,
+        error: error.message
+      });
+      return;
+    }
+
     const message = toErrorMessage(error);
     if (request.path.startsWith("/api/")) {
       response.status(500).json({ error: message });

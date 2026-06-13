@@ -4,8 +4,8 @@
   },
   "repo": {
     "localPath": "./data/repo",
-    "remoteUrl": "http://12.103.118.207:10880/AI/aifp-config-tob.git",
-    "branch": "master",
+    "remoteUrl": "https://git.example.com/your-group/your-repo.git",
+    "branch": "main",
     "configRoot": "nacos-config/config",
     "allowedExtensions": [
       "",
@@ -19,18 +19,11 @@
       ".env",
       ".xml",
       ".txt",
-      ".md",
-      ".js",
-      ".ts",
-      ".tsx",
-      ".css",
-      ".scss",
-      ".html",
-      ".sh"
+      ".md"
     ],
     "auth": {
-      "username": "rhb",
-      "password": "nbcb,111"
+      "username": "",
+      "password": ""
     },
     "commitMessagePrefix": "config: ",
     "cloneOnStart": true

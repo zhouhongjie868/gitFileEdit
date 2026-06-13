@@ -1,4 +1,7 @@
 node_modules
 dist
 data/repo
+data/test-remote.git
+data/test-seed
 data/runtime.json
+data/users.json

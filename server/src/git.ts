@@ -11,19 +11,32 @@ import {
   writeFile
 } from "node:fs/promises";
 import {
+  getEnvironmentOptions,
   normalizeVisibleRoots,
   resolveRepoPath
 } from "./config";
+import { validateConfigFileContent } from "./fileValidation";
 import type {
   AppConfig,
   CommitSnapshot,
+  FileConflictPayload,
   FileDetail,
   RepoFileSummary,
   RepoStatus,
   RuntimeState
 } from "./types";
+import type { AuthUser } from "./types";
 
 const execFileAsync = promisify(execFile);
+
+export class FileConflictError extends Error {
+  statusCode = 409;
+
+  constructor(public payload: FileConflictPayload) {
+    super(payload.message);
+  }
+}
+
 function logRepoDebug(scope: string, payload: Record<string, unknown>): void {
   console.log(`[repo-debug] ${scope}`, JSON.stringify(payload, null, 2));
 }
@@ -53,6 +66,16 @@ function normalizeAllowedFilePath(config: AppConfig, repoPath: string, filePath:
   return repoRelativePath;
 }
 
+function getEnvironmentLabelForFile(config: AppConfig, repoRelativePath: string): string | null {
+  const normalizedPath = repoRelativePath.replace(/^\/+/, "");
+  const matchedEnvironment = getEnvironmentOptions(config).find((environment) => {
+    const root = environment.root.replace(/^\/+|\/+$/g, "");
+    return normalizedPath === root || normalizedPath.startsWith(`${root}/`);
+  });
+
+  return matchedEnvironment?.label ?? null;
+}
+
 function getConfiguredRepoAuth(config: AppConfig): {
   username?: string;
   password?: string;
@@ -66,17 +89,17 @@ function getConfiguredRepoAuth(config: AppConfig): {
   };
 }
 
-function getGitCommitIdentityArgs(config: AppConfig): string[] {
-  const username = config.repo.auth.username.trim();
-  if (!username) {
+function getGitCommitIdentityArgs(config: AppConfig, actor?: AuthUser): string[] {
+  const name = actor?.id?.trim() || config.repo.auth.username.trim();
+  if (!name) {
     return [];
   }
 
   return [
     "-c",
-    `user.name=${username}`,
+    `user.name=${name}`,
     "-c",
-    `user.email=${username}@local`
+    "user.email=git-file-edit@local"
   ];
 }
 
@@ -88,6 +111,10 @@ function getGitAuthArgs(config: AppConfig): string[] {
 
   const token = Buffer.from(`${auth.username}:${auth.password}`, "utf8").toString("base64");
   return ["-c", `http.extraHeader=Authorization: Basic ${token}`];
+}
+
+function getRemoteTrackingRef(config: AppConfig): string {
+  return `refs/remotes/origin/${config.repo.branch}`;
 }
 
 function getRemoteUrlSummary(remoteUrl: string): {
@@ -153,6 +180,27 @@ async function runGit(
       maxBuffer: 10 * 1024 * 1024
     });
     return result.stdout.trimEnd();
+  } catch (error) {
+    throw formatGitError(error);
+  }
+}
+
+async function runGitRaw(
+  args: string[],
+  options: {
+    cwd: string;
+  }
+): Promise<string> {
+  try {
+    const result = await execFileAsync("git", args, {
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0"
+      },
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return result.stdout;
   } catch (error) {
     throw formatGitError(error);
   }
@@ -247,7 +295,7 @@ export async function syncRepo(
 ): Promise<void> {
   const repoPath = resolveRepoPath(config);
   const remoteUrl = config.repo.remoteUrl;
-  const remoteTrackingRef = `refs/remotes/origin/${config.repo.branch}`;
+  const remoteTrackingRef = getRemoteTrackingRef(config);
   const auth = getConfiguredRepoAuth(config);
   const remoteUrlSummary = getRemoteUrlSummary(remoteUrl);
   await mkdir(path.dirname(repoPath), { recursive: true });
@@ -298,30 +346,31 @@ export async function syncRepo(
       cwd: repoPath
     }
   );
-  await runGit(
-    ["checkout", config.repo.branch],
-    {
-      cwd: repoPath
-    }
-  ).catch(() => "");
-  await runGit(
-    ["merge", "--ff-only", remoteTrackingRef],
-    {
-      cwd: repoPath
-    }
-  ).catch((error) => {
-    logRepoDebug("syncRepo.merge.skip", {
-      repoPath,
-      branch: config.repo.branch,
-      error: (error as Error).message
-    });
-    return "";
+  await runGit(["checkout", config.repo.branch], {
+    cwd: repoPath
+  });
+  await runGit(["merge", "--ff-only", remoteTrackingRef], {
+    cwd: repoPath
   });
   logRepoDebug("syncRepo.pull.done", {
     repoPath,
     branch: config.repo.branch,
     remoteTrackingRef
   });
+}
+
+async function fetchRemoteBranch(config: AppConfig, repoPath: string): Promise<void> {
+  await runGit(
+    buildGitArgsWithManagedCredentials(config, [
+      "fetch",
+      "--prune",
+      config.repo.remoteUrl,
+      `+refs/heads/${config.repo.branch}:${getRemoteTrackingRef(config)}`
+    ]),
+    {
+      cwd: repoPath
+    }
+  );
 }
 
 async function collectFilesystemStats(
@@ -380,7 +429,11 @@ export async function listRepoFiles(config: AppConfig): Promise<RepoFileSummary[
   const extensionFilteredOut = visibleCandidates.filter(
     (item) => !config.repo.allowedExtensions.includes(path.extname(item).toLowerCase())
   );
-  const candidates = new Set(visibleCandidates);
+  const candidates = new Set(
+    visibleCandidates.filter((item) =>
+      config.repo.allowedExtensions.includes(path.extname(item).toLowerCase())
+    )
+  );
 
   const files = await Promise.all(
     Array.from(candidates)
@@ -419,7 +472,7 @@ async function readGitFile(
   repoRelativePath: string
 ): Promise<string> {
   try {
-    return await runGit([`show`, `${ref}:${repoRelativePath}`], { cwd: repoPath });
+    return await runGitRaw([`show`, `${ref}:${repoRelativePath}`], { cwd: repoPath });
   } catch {
     return "";
   }
@@ -433,36 +486,69 @@ async function readRemoteTrackingFile(
   return readGitFile(repoPath, `origin/${branch}`, repoRelativePath);
 }
 
-async function readLastCommitSnapshot(
+async function readGitBlobId(
   repoPath: string,
+  ref: string,
   repoRelativePath: string
-): Promise<CommitSnapshot | null> {
+): Promise<string | null> {
+  const output = await runGit(["rev-parse", `${ref}:${repoRelativePath}`], {
+    cwd: repoPath
+  }).catch(() => "");
+  return output.trim() || null;
+}
+
+async function readGitRef(repoPath: string, ref: string): Promise<string | null> {
+  const output = await runGit(["rev-parse", ref], { cwd: repoPath }).catch(() => "");
+  return output.trim() || null;
+}
+
+async function readFileHistorySnapshots(
+  repoPath: string,
+  repoRelativePath: string,
+  limit = 20
+): Promise<CommitSnapshot[]> {
   const rawMeta = await runGit(
-    ["log", "-1", "--format=%H%n%an%n%ae%n%ad%n%s", "--date=iso-strict", "--", repoRelativePath],
+    [
+      "log",
+      `-${limit}`,
+      "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%B%x1e",
+      "--date=iso-strict",
+      "--",
+      repoRelativePath
+    ],
     { cwd: repoPath }
   ).catch(() => "");
 
   if (!rawMeta) {
-    return null;
+    return [];
   }
 
-  const [hash, authorName, authorEmail, committedAt, ...messageParts] =
-    rawMeta.split("\n");
-  const message = messageParts.join("\n").trim();
-  const [beforeContent, afterContent] = await Promise.all([
-    readGitFile(repoPath, `${hash}^`, repoRelativePath),
-    readGitFile(repoPath, hash, repoRelativePath)
-  ]);
+  const records = rawMeta
+    .split("\x1e")
+    .map((record) => record.trim())
+    .filter(Boolean);
 
-  return {
-    hash,
-    authorName,
-    authorEmail,
-    committedAt,
-    message,
-    beforeContent,
-    afterContent
-  };
+  return Promise.all(
+    records.map(async (record) => {
+      const [hash, authorName, authorEmail, committedAt, ...messageParts] =
+        record.split("\x1f");
+      const message = messageParts.join("\x1f").trim();
+      const [beforeContent, afterContent] = await Promise.all([
+        readGitFile(repoPath, `${hash}^`, repoRelativePath),
+        readGitFile(repoPath, hash, repoRelativePath)
+      ]);
+
+      return {
+        hash,
+        authorName,
+        authorEmail,
+        committedAt,
+        message,
+        beforeContent,
+        afterContent
+      };
+    })
+  );
 }
 
 export async function readFileDetail(
@@ -472,7 +558,18 @@ export async function readFileDetail(
   const repoPath = resolveRepoPath(config);
   const repoRelativePath = normalizeAllowedFilePath(config, repoPath, filePath);
   const absolutePath = path.resolve(repoPath, repoRelativePath);
-  const [content, remoteContent, headContent, statusOutput, fileStats, lastCommit] =
+  const [
+    content,
+    remoteContent,
+    headContent,
+    statusOutput,
+    fileStats,
+    history,
+    baseHead,
+    baseBlob,
+    remoteHead,
+    remoteBlob
+  ] =
     await Promise.all([
       readFile(absolutePath, "utf8"),
       readRemoteTrackingFile(repoPath, config.repo.branch, repoRelativePath),
@@ -481,7 +578,11 @@ export async function readFileDetail(
         () => ""
       ),
       stat(absolutePath),
-      readLastCommitSnapshot(repoPath, repoRelativePath)
+      readFileHistorySnapshots(repoPath, repoRelativePath),
+      readGitRef(repoPath, "HEAD"),
+      readGitBlobId(repoPath, "HEAD", repoRelativePath),
+      readGitRef(repoPath, `origin/${config.repo.branch}`),
+      readGitBlobId(repoPath, `origin/${config.repo.branch}`, repoRelativePath)
     ]);
 
   return {
@@ -489,9 +590,14 @@ export async function readFileDetail(
     content,
     remoteContent,
     headContent,
+    baseHead: baseHead ?? "",
+    baseBlob,
+    remoteHead,
+    remoteBlob,
     isDirty: Boolean(statusOutput.trim()),
     modifiedAt: fileStats.mtime.toISOString(),
-    lastCommit
+    lastCommit: history[0] ?? null,
+    history
   };
 }
 
@@ -503,6 +609,7 @@ export async function writeRepoFile(
   const repoPath = resolveRepoPath(config);
   const repoRelativePath = normalizeAllowedFilePath(config, repoPath, filePath);
   const absolutePath = path.resolve(repoPath, repoRelativePath);
+  validateConfigFileContent(repoRelativePath, content);
   await mkdir(path.dirname(absolutePath), { recursive: true });
   await writeFile(absolutePath, content, "utf8");
   return readFileDetail(config, repoRelativePath);
@@ -513,14 +620,72 @@ export async function commitAndPushFile(
   _runtime: RuntimeState,
   input: {
     path: string;
+    content: string;
     message: string;
+    baseHead: string;
+    baseBlob: string | null;
+    actor?: AuthUser;
   }
 ): Promise<{ head: string; path: string }> {
   const repoPath = resolveRepoPath(config);
   const repoRelativePath = normalizeAllowedFilePath(config, repoPath, input.path);
+  const baseHead = input.baseHead.trim();
+  if (!baseHead) {
+    throw new Error("缺少打开文件时的版本信息，请刷新文件后重试");
+  }
+
+  await fetchRemoteBranch(config, repoPath);
+
+  const remoteRef = `origin/${config.repo.branch}`;
+  const [currentHead, remoteHead, remoteBlob] = await Promise.all([
+    readGitRef(repoPath, "HEAD"),
+    readGitRef(repoPath, remoteRef),
+    readGitBlobId(repoPath, remoteRef, repoRelativePath)
+  ]);
+
+  if (remoteBlob !== input.baseBlob) {
+    const [baseContent, remoteContent] = await Promise.all([
+      readGitFile(repoPath, baseHead, repoRelativePath),
+      readGitFile(repoPath, remoteRef, repoRelativePath)
+    ]);
+    throw new FileConflictError({
+      type: "conflict",
+      message: "该文件已被其他人更新，请先处理冲突后再提交",
+      path: repoRelativePath,
+      baseHead,
+      remoteHead,
+      remoteBlob,
+      baseContent,
+      localContent: input.content,
+      remoteContent
+    });
+  }
+
+  if (remoteHead && currentHead !== remoteHead) {
+    await runGit(["restore", "--staged", "--worktree", "--", repoRelativePath], {
+      cwd: repoPath
+    }).catch(() => "");
+    await runGit(["merge", "--ff-only", remoteRef], {
+      cwd: repoPath
+    });
+  }
+
   const detailMessage = input.message.trim();
   const prefix = config.repo.commitMessagePrefix || "";
-  const commitMessage = `${prefix}${detailMessage}`.trim();
+  const environmentLabel = getEnvironmentLabelForFile(config, repoRelativePath);
+  const metadataLines = [
+    input.actor ? `提交用户：${input.actor.id}` : null,
+    environmentLabel ? `修改环境：${environmentLabel}` : null
+  ].filter((item): item is string => Boolean(item));
+  const commitMessage = [
+    `${prefix}${detailMessage || "更新配置"}`.trim(),
+    ...metadataLines
+  ].join("\n\n");
+
+  const absolutePath = path.resolve(repoPath, repoRelativePath);
+  validateConfigFileContent(repoRelativePath, input.content);
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, input.content, "utf8");
 
   const workingTreeStatus = await runGit(["status", "--porcelain", "--", repoRelativePath], {
     cwd: repoPath
@@ -546,7 +711,141 @@ export async function commitAndPushFile(
   await runGit(["add", "--", repoRelativePath], { cwd: repoPath });
   await runGit(
     [
-      ...getGitCommitIdentityArgs(config),
+      ...getGitCommitIdentityArgs(config, input.actor),
+      "commit",
+      "--no-gpg-sign",
+      "-m",
+      commitMessage,
+      "--",
+      repoRelativePath
+    ],
+    { cwd: repoPath }
+  );
+  await runGit(
+    buildGitArgsWithManagedCredentials(config, [
+      "push",
+      pushRemoteUrl,
+      `HEAD:${config.repo.branch}`
+    ]),
+    { cwd: repoPath }
+  );
+
+  const head = await runGit(["rev-parse", "HEAD"], { cwd: repoPath });
+  return {
+    head,
+    path: repoRelativePath
+  };
+}
+
+export async function restoreFileToHistoryCommit(
+  config: AppConfig,
+  _runtime: RuntimeState,
+  input: {
+    path: string;
+    hash: string;
+    baseHead: string;
+    baseBlob: string | null;
+    actor?: AuthUser;
+  }
+): Promise<{ head: string; path: string }> {
+  const repoPath = resolveRepoPath(config);
+  const repoRelativePath = normalizeAllowedFilePath(config, repoPath, input.path);
+  const baseHead = input.baseHead.trim();
+  const targetHash = input.hash.trim();
+
+  if (!baseHead) {
+    throw new Error("缺少打开文件时的版本信息，请刷新文件后重试");
+  }
+  if (!/^[0-9a-f]{7,40}$/i.test(targetHash)) {
+    throw new Error("历史版本标识无效");
+  }
+
+  const targetBlob = await readGitBlobId(repoPath, targetHash, repoRelativePath);
+  if (!targetBlob) {
+    throw new Error("所选历史版本中不存在该文件");
+  }
+
+  await fetchRemoteBranch(config, repoPath);
+
+  const remoteRef = `origin/${config.repo.branch}`;
+  const [currentHead, remoteHead, remoteBlob] = await Promise.all([
+    readGitRef(repoPath, "HEAD"),
+    readGitRef(repoPath, remoteRef),
+    readGitBlobId(repoPath, remoteRef, repoRelativePath)
+  ]);
+
+  if (remoteBlob !== input.baseBlob) {
+    const [baseContent, remoteContent] = await Promise.all([
+      readGitFile(repoPath, baseHead, repoRelativePath),
+      readGitFile(repoPath, remoteRef, repoRelativePath)
+    ]);
+    throw new FileConflictError({
+      type: "conflict",
+      message: "该文件已被其他人更新，请先处理冲突后再回滚",
+      path: repoRelativePath,
+      baseHead,
+      remoteHead,
+      remoteBlob,
+      baseContent,
+      localContent: await readGitFile(repoPath, targetHash, repoRelativePath),
+      remoteContent
+    });
+  }
+
+  if (remoteHead && currentHead !== remoteHead) {
+    await runGit(["restore", "--staged", "--worktree", "--", repoRelativePath], {
+      cwd: repoPath
+    }).catch(() => "");
+    await runGit(["merge", "--ff-only", remoteRef], {
+      cwd: repoPath
+    });
+  }
+
+  const targetContent = await readGitFile(repoPath, targetHash, repoRelativePath);
+  validateConfigFileContent(repoRelativePath, targetContent);
+
+  const absolutePath = path.resolve(repoPath, repoRelativePath);
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, targetContent, "utf8");
+
+  const workingTreeStatus = await runGit(["status", "--porcelain", "--", repoRelativePath], {
+    cwd: repoPath
+  });
+  if (!workingTreeStatus.trim()) {
+    throw new Error("当前文件已是所选历史版本");
+  }
+
+  const auth = getConfiguredRepoAuth(config);
+  const pushRemoteUrl = config.repo.remoteUrl;
+  const remoteUrlSummary = getRemoteUrlSummary(pushRemoteUrl);
+
+  logRepoDebug("restoreFileToHistoryCommit.push.start", {
+    repoPath,
+    branch: config.repo.branch,
+    path: repoRelativePath,
+    targetHash,
+    username: auth.username || null,
+    resolvedRemoteHost: remoteUrlSummary.host,
+    resolvedRemoteUsername: remoteUrlSummary.username,
+    authMode: "http.extraHeader"
+  });
+
+  const prefix = config.repo.commitMessagePrefix || "";
+  const environmentLabel = getEnvironmentLabelForFile(config, repoRelativePath);
+  const metadataLines = [
+    input.actor ? `提交用户：${input.actor.id}` : null,
+    environmentLabel ? `修改环境：${environmentLabel}` : null,
+    `回滚来源：${targetHash}`
+  ].filter((item): item is string => Boolean(item));
+  const commitMessage = [
+    `${prefix}回滚配置到 ${targetHash.slice(0, 8)}`.trim(),
+    ...metadataLines
+  ].join("\n\n");
+
+  await runGit(["add", "--", repoRelativePath], { cwd: repoPath });
+  await runGit(
+    [
+      ...getGitCommitIdentityArgs(config, input.actor),
       "commit",
       "--no-gpg-sign",
       "-m",
