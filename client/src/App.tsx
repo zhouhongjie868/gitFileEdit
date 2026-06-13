@@ -1,19 +1,31 @@
 import { diffLines } from "diff";
-import { startTransition, useEffect, useState, type FormEvent } from "react";
+import {
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject
+} from "react";
 import type {
   AuthUser,
   BootstrapResponse,
+  FileConflictPayload,
   FileDetail,
   RepoEnvironmentOption,
   RepoFileSummary
 } from "./types";
 
-interface DiffRow {
+interface DiffLine {
+  text: string;
+  hasNewline: boolean;
+}
+
+interface DiffBlock {
   id: string;
   type: "added" | "removed" | "same";
   marker: "+" | "-" | " ";
-  text: string;
-  hasNewline: boolean;
+  lines: DiffLine[];
 }
 
 interface FileTreeNode {
@@ -48,6 +60,17 @@ const emptyBlockClass =
   "rounded-[22px] border border-dashed border-[#183039]/15 bg-[#f6f9f7]/85 p-6 text-center text-[#73848a]";
 const codeSurfaceClass =
   "m-0 rounded-[22px] border border-[#183039]/10 bg-[#fafcfb]/95 p-4 font-mono text-[13px] leading-[1.65] whitespace-pre-wrap break-words";
+const editorSurfaceHeightClass = "h-[62vh] min-h-[360px] max-h-[640px] overflow-auto";
+
+class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public payload: unknown
+  ) {
+    super(message);
+  }
+}
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -59,27 +82,32 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const fallbackText = await response.text();
+    let payload: unknown = null;
     try {
-      const payload = JSON.parse(fallbackText) as { error?: string };
-      throw new Error(payload.error || "请求失败");
-    } catch (error) {
-      if (error instanceof Error && payloadHasErrorMessage(fallbackText)) {
-        throw error;
-      }
-      throw new Error(fallbackText || "请求失败");
+      payload = fallbackText ? JSON.parse(fallbackText) : null;
+    } catch {
+      payload = null;
     }
+
+    const message =
+      payload && typeof payload === "object" && "message" in payload
+        ? String((payload as { message?: unknown }).message)
+        : payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error?: unknown }).error)
+          : fallbackText || "请求失败";
+    throw new ApiRequestError(message, response.status, payload);
   }
 
   return (await response.json()) as T;
 }
 
-function payloadHasErrorMessage(value: string): boolean {
-  try {
-    const payload = JSON.parse(value) as { error?: unknown };
-    return typeof payload.error === "string";
-  } catch {
-    return false;
-  }
+function isFileConflictPayload(value: unknown): value is FileConflictPayload {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as { type?: unknown }).type === "conflict" &&
+      typeof (value as { path?: unknown }).path === "string"
+  );
 }
 
 function formatTime(isoTime: string | null): string {
@@ -340,42 +368,59 @@ function DiffView(props: {
   emptyText: string;
   className?: string;
   showContentWhenUnchanged?: boolean;
+  scrollRef?: RefObject<HTMLDivElement>;
 }): JSX.Element {
   const segments = diffLines(props.before, props.after);
-  const diffRows: DiffRow[] = segments.flatMap((segment, index) => {
-    const rawLines = splitDiffLines(segment.value);
+  const diffBlocks: DiffBlock[] = segments.flatMap((segment, index) => {
+    const type = segment.added ? "added" : segment.removed ? "removed" : "same";
+    const marker = segment.added ? "+" : segment.removed ? "-" : " ";
+    const lines = splitDiffLines(segment.value);
 
-    return rawLines.map((line, lineIndex): DiffRow => ({
+    if (type !== "same") {
+      return [
+        {
+          id: `${index}`,
+          type,
+          marker,
+          lines
+        }
+      ];
+    }
+
+    return lines.map((line, lineIndex): DiffBlock => ({
       id: `${index}-${lineIndex}`,
-      type: segment.added ? "added" : segment.removed ? "removed" : "same",
-      marker: segment.added ? "+" : segment.removed ? "-" : " ",
-      text: line.text,
-      hasNewline: line.hasNewline
+      type,
+      marker,
+      lines: [line]
     }));
   });
 
-  const hasChange = diffRows.some((row) => row.type !== "same");
-  const rows = hasChange || props.showContentWhenUnchanged
-    ? diffRows
+  const hasChange = diffBlocks.some((block) => block.type !== "same");
+  const blocks = hasChange || props.showContentWhenUnchanged
+    ? diffBlocks
     : [];
-  if (rows.length === 0) {
-    return <div className={cn(emptyBlockClass, props.className)}>{props.emptyText}</div>;
+  if (blocks.length === 0) {
+    return <div ref={props.scrollRef} className={cn(emptyBlockClass, props.className)}>{props.emptyText}</div>;
   }
 
   return (
-    <div className={cn("grid auto-rows-min content-start gap-0.5 rounded-[22px] border border-[#183039]/10 bg-[#fafcfb]/95 p-4", props.className)}>
-      {rows.map((row) => (
+    <div ref={props.scrollRef} className={cn("grid auto-rows-min content-start gap-0.5 rounded-[22px] border border-[#183039]/10 bg-[#fafcfb]/95 p-4", props.className)}>
+      {blocks.map((block) => (
         <div
-          key={row.id}
+          key={block.id}
           className={cn(
             "grid grid-cols-[18px_minmax(0,1fr)] gap-2 rounded-[10px] px-1.5 py-1",
-            row.type === "added" && "bg-[#1d8c68]/10",
-            row.type === "removed" && "bg-[#c94a35]/10"
+            block.type === "added" && "bg-[#1d8c68]/10",
+            block.type === "removed" && "bg-[#c94a35]/10"
           )}
         >
-          <span className="font-mono text-[#4a5b61]">{row.marker}</span>
-          <span className="whitespace-pre-wrap break-words font-mono text-[13px] leading-[1.65]">
-            <VisibleWhitespace text={row.text} hasNewline={row.hasNewline} />
+          <span className="font-mono text-[#4a5b61]">{block.marker}</span>
+          <span className="grid gap-0 whitespace-pre-wrap break-words font-mono text-[13px] leading-[1.65]">
+            {block.lines.map((line, lineIndex) => (
+              <span key={lineIndex}>
+                <VisibleWhitespace text={line.text} hasNewline={line.hasNewline} />
+              </span>
+            ))}
           </span>
         </div>
       ))}
@@ -383,7 +428,7 @@ function DiffView(props: {
   );
 }
 
-function splitDiffLines(value: string): Array<{ text: string; hasNewline: boolean }> {
+function splitDiffLines(value: string): DiffLine[] {
   if (!value) {
     return [];
   }
@@ -431,6 +476,7 @@ function VisibleWhitespace(props: { text: string; hasNewline: boolean }): JSX.El
 }
 
 export default function App(): JSX.Element {
+  const pendingDiffRef = useRef<HTMLDivElement>(null);
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>("");
   const [fileQuery, setFileQuery] = useState("");
@@ -438,6 +484,7 @@ export default function App(): JSX.Element {
   const [fileDetail, setFileDetail] = useState<FileDetail | null>(null);
   const [editorContent, setEditorContent] = useState("");
   const [editorDirty, setEditorDirty] = useState(false);
+  const [fileConflict, setFileConflict] = useState<FileConflictPayload | null>(null);
   const [gitForm, setGitForm] = useState({
     extraMessage: ""
   });
@@ -458,6 +505,40 @@ export default function App(): JSX.Element {
   });
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [loggingIn, setLoggingIn] = useState(false);
+
+  function scrollPendingDiffToRatio(ratio: number): void {
+    const diffElement = pendingDiffRef.current;
+    if (!diffElement) {
+      return;
+    }
+
+    const maxScrollTop = diffElement.scrollHeight - diffElement.clientHeight;
+    if (maxScrollTop <= 0) {
+      return;
+    }
+
+    diffElement.scrollTop = Math.max(0, Math.min(maxScrollTop, maxScrollTop * ratio));
+  }
+
+  function syncPendingDiffToEditorCursor(textarea: HTMLTextAreaElement): void {
+    window.requestAnimationFrame(() => {
+      const textBeforeCursor = textarea.value.slice(0, textarea.selectionStart);
+      const cursorLineIndex = textBeforeCursor.split("\n").length - 1;
+      const totalLines = Math.max(textarea.value.split("\n").length, 1);
+      const ratio = totalLines <= 1 ? 0 : cursorLineIndex / (totalLines - 1);
+      scrollPendingDiffToRatio(ratio);
+    });
+  }
+
+  function syncPendingDiffToEditorScroll(textarea: HTMLTextAreaElement): void {
+    const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
+    if (maxScrollTop <= 0) {
+      scrollPendingDiffToRatio(0);
+      return;
+    }
+
+    scrollPendingDiffToRatio(textarea.scrollTop / maxScrollTop);
+  }
 
   async function refreshBootstrap(preferredPath?: string, preserveForm = true): Promise<void> {
     const data = await requestJson<BootstrapResponse>("/api/bootstrap");
@@ -495,6 +576,7 @@ export default function App(): JSX.Element {
         setFileDetail(null);
         setEditorContent("");
         setEditorDirty(false);
+        setFileConflict(null);
       });
       return;
     }
@@ -508,6 +590,7 @@ export default function App(): JSX.Element {
       if (!preserveDraft || !editorDirty) {
         setEditorContent(detail.content);
         setEditorDirty(false);
+        setFileConflict(null);
       }
     });
   }
@@ -582,6 +665,7 @@ export default function App(): JSX.Element {
     setMessage(null);
 
     try {
+      setFileConflict(null);
       const detail = await requestJson<FileDetail>("/api/file", {
         method: "PUT",
         body: JSON.stringify({
@@ -595,7 +679,7 @@ export default function App(): JSX.Element {
         setEditorContent(detail.content);
         setEditorDirty(false);
       });
-      setMessage("文件已保存到工作区");
+      setMessage("文件已暂存到工作区");
       await refreshBootstrap(selectedPath);
     } catch (saveError) {
       setError((saveError as Error).message);
@@ -614,25 +698,22 @@ export default function App(): JSX.Element {
     setMessage(null);
 
     try {
-      if (editorDirty) {
-        await requestJson<FileDetail>("/api/file", {
-          method: "PUT",
-          body: JSON.stringify({
-            path: selectedPath,
-            content: editorContent
-          })
-        });
-        setEditorDirty(false);
+      if (!fileDetail) {
+        throw new Error("请先选择要提交的文件");
       }
 
       await requestJson<{ head: string; path: string }>("/api/commit", {
         method: "POST",
         body: JSON.stringify({
           path: selectedPath,
+          content: editorContent,
+          baseHead: fileDetail.baseHead,
+          baseBlob: fileDetail.baseBlob,
           message: gitForm.extraMessage
         })
       });
 
+      setFileConflict(null);
       await refreshBootstrap(selectedPath);
       await refreshFile(selectedPath, false);
       setGitForm((current) => ({
@@ -641,6 +722,28 @@ export default function App(): JSX.Element {
       }));
       setMessage("修改已提交并推送到远程仓库");
     } catch (commitError) {
+      if (
+        commitError instanceof ApiRequestError &&
+        commitError.status === 409 &&
+        isFileConflictPayload(commitError.payload)
+      ) {
+        const conflictPayload = commitError.payload;
+        setFileConflict(conflictPayload);
+        setFileDetail((current) =>
+          current
+            ? {
+                ...current,
+                baseHead: conflictPayload.remoteHead ?? current.baseHead,
+                baseBlob: conflictPayload.remoteBlob,
+                remoteHead: conflictPayload.remoteHead,
+                remoteBlob: conflictPayload.remoteBlob,
+                remoteContent: conflictPayload.remoteContent,
+                headContent: conflictPayload.remoteContent
+              }
+            : current
+        );
+        setEditorDirty(true);
+      }
       setError((commitError as Error).message);
     } finally {
       setCommitting(false);
@@ -1024,7 +1127,7 @@ export default function App(): JSX.Element {
                   }
                 />
                 <button className={secondaryButtonClass} onClick={() => void saveCurrentFile()} disabled={!selectedPath || saving}>
-                  {saving ? "保存中..." : "保存"}
+                  {saving ? "暂存中..." : "暂存"}
                 </button>
                 <button className={primaryButtonClass} onClick={() => void commitAndPush()} disabled={!selectedPath || committing}>
                   {committing ? "提交中..." : "提交并推送"}
@@ -1035,9 +1138,52 @@ export default function App(): JSX.Element {
             {message ? <div className="mb-3.5 rounded-2xl bg-[#1d8c68]/10 px-3.5 py-3 text-sm text-[#12684d]">{message}</div> : null}
             {liveNotice ? <div className="mb-3.5 rounded-2xl bg-[#2475b2]/10 px-3.5 py-3 text-sm text-[#18527e]">{liveNotice}</div> : null}
             {error ? <div className="mb-3.5 rounded-2xl bg-[#c94a35]/10 px-3.5 py-3 text-sm text-[#8d3322]">{error}</div> : null}
+            {fileConflict ? (
+              <div className="mb-3.5 grid gap-3 rounded-2xl border border-[#c94a35]/20 bg-[#c94a35]/10 px-3.5 py-3 text-sm text-[#79301f]">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <strong>检测到远程冲突</strong>
+                    <div className="mt-1 text-[#8d3322]">
+                      远程文件已更新，你的编辑内容已保留在右侧编辑器中。
+                    </div>
+                  </div>
+                  <button
+                    className={secondaryButtonClass}
+                    type="button"
+                    onClick={() => {
+                      setEditorContent(fileConflict.remoteContent);
+                      setEditorDirty(false);
+                      setFileDetail((current) =>
+                        current
+                          ? {
+                              ...current,
+                              content: fileConflict.remoteContent,
+                              remoteContent: fileConflict.remoteContent,
+                              headContent: fileConflict.remoteContent,
+                              baseHead: fileConflict.remoteHead ?? current.baseHead,
+                              baseBlob: fileConflict.remoteBlob,
+                              remoteHead: fileConflict.remoteHead,
+                              remoteBlob: fileConflict.remoteBlob,
+                              isDirty: false
+                            }
+                          : current
+                      );
+                      setFileConflict(null);
+                    }}
+                  >
+                    使用远程版本
+                  </button>
+                </div>
+                <DiffView
+                  before={fileConflict.remoteContent}
+                  after={fileConflict.localContent}
+                  emptyText="远程版本与我的修改没有内容差异"
+                />
+              </div>
+            ) : null}
 
             <div className="grid gap-[18px] min-[961px]:grid-cols-2">
-              <div className="grid gap-3">
+              <div className="grid content-start gap-3">
                 <div className="flex min-h-[32px] flex-wrap items-center gap-2">
                   <div className="font-bold text-[#20404a]">原始文件</div>
                   {selectedPath && !hasPendingChanges ? (
@@ -1050,20 +1196,26 @@ export default function App(): JSX.Element {
                   before={pendingBaseContent}
                   after={pendingContent}
                   emptyText={loading ? "正在加载..." : "当前文件没有未提交差异"}
-                  className="min-h-[480px]"
+                  className={editorSurfaceHeightClass}
+                  scrollRef={pendingDiffRef}
                   showContentWhenUnchanged
                 />
               </div>
 
-              <div className="grid gap-3">
-                <div className="font-bold text-[#20404a]">在线编辑</div>
+              <div className="grid content-start gap-3">
+                <div className="flex min-h-[32px] items-center font-bold text-[#20404a]">在线编辑</div>
                 <textarea
-                  className={cn(codeSurfaceClass, "min-h-[480px] w-full resize-y outline-none")}
+                  className={cn(codeSurfaceClass, editorSurfaceHeightClass, "w-full resize-none outline-none")}
                   value={editorContent}
                   onChange={(event) => {
                     setEditorContent(event.target.value);
                     setEditorDirty(true);
+                    syncPendingDiffToEditorCursor(event.currentTarget);
                   }}
+                  onClick={(event) => syncPendingDiffToEditorCursor(event.currentTarget)}
+                  onKeyUp={(event) => syncPendingDiffToEditorCursor(event.currentTarget)}
+                  onSelect={(event) => syncPendingDiffToEditorCursor(event.currentTarget)}
+                  onScroll={(event) => syncPendingDiffToEditorScroll(event.currentTarget)}
                   placeholder="请选择要编辑的文件"
                   disabled={!selectedPath}
                 />

@@ -13,6 +13,7 @@ import {
 } from "./config";
 import {
   commitAndPushFile,
+  FileConflictError,
   inspectRepo,
   listRepoFiles,
   readFileDetail,
@@ -220,16 +221,27 @@ app.post("/api/repo/sync", async (_request, response, next) => {
 app.post("/api/commit", async (request, response, next) => {
   try {
     const filePath = String(request.body.path ?? "").trim();
+    const content = String(request.body.content ?? "");
     const detailMessage = String(request.body.message ?? "").trim();
+    const baseHead = String(request.body.baseHead ?? "").trim();
+    const baseBlob =
+      typeof request.body.baseBlob === "string" ? request.body.baseBlob : null;
     if (!filePath) {
       response.status(400).json({ error: "缺少文件路径" });
+      return;
+    }
+    if (!baseHead) {
+      response.status(400).json({ error: "缺少打开文件时的版本信息" });
       return;
     }
 
     const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
     const result = await commitAndPushFile(config, runtime, {
       path: filePath,
+      content,
       message: detailMessage,
+      baseHead,
+      baseBlob,
       actor: request.user
     });
     await markLastSyncedAt(new Date().toISOString());
@@ -241,7 +253,9 @@ app.post("/api/commit", async (request, response, next) => {
     });
     response.json(result);
   } catch (error) {
-    lastRepoError = toErrorMessage(error);
+    if (!(error instanceof FileConflictError)) {
+      lastRepoError = toErrorMessage(error);
+    }
     next(error);
   }
 });
@@ -258,6 +272,11 @@ app.get("*", (_request, response) => {
 
 app.use(
   (error: unknown, request: Request, response: Response, _next: NextFunction) => {
+    if (error instanceof FileConflictError) {
+      response.status(error.statusCode).json(error.payload);
+      return;
+    }
+
     const message = toErrorMessage(error);
     if (request.path.startsWith("/api/")) {
       response.status(500).json({ error: message });
