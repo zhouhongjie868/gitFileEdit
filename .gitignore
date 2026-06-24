@@ -5,3 +5,8 @@ data/test-remote.git
 data/test-seed
 data/runtime.json
 data/users.json
+data/activation-redemptions.json
+.DS_Store
+AGENTS.md
+PR.md
+git-file-console-amd64.tar

@@ -13,6 +13,7 @@ export interface AppConfig {
       username: string;
       password: string;
     };
+    environments?: RepoEnvironmentOption[];
     commitMessagePrefix: string;
     cloneOnStart: boolean;
   };
@@ -24,6 +25,7 @@ export interface RuntimeState {
 
 export interface AuthUser {
   id: string;
+  role: "user" | "admin";
 }
 
 export interface RepoFileSummary {
@@ -48,6 +50,7 @@ export interface RepoEnvironmentOption {
   id: string;
   label: string;
   root: string;
+  requiresAdminToEdit: boolean;
 }
 
 export interface CommitSnapshot {
@@ -56,6 +59,27 @@ export interface CommitSnapshot {
   authorEmail: string;
   committedAt: string;
   message: string;
+  beforeContent: string;
+  afterContent: string;
+}
+
+export interface EnvironmentReviewFile {
+  path: string;
+  status: string;
+}
+
+export interface EnvironmentReviewCommit {
+  hash: string;
+  authorName: string;
+  authorEmail: string;
+  committedAt: string;
+  message: string;
+  files: EnvironmentReviewFile[];
+}
+
+export interface EnvironmentReviewDiff {
+  hash: string;
+  path: string;
   beforeContent: string;
   afterContent: string;
 }

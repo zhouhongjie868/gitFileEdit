@@ -1,6 +1,6 @@
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { login, logout, me, register, requireAuth } from "./auth";
+import { activateAdmin, login, logout, me, register, requireAuth } from "./auth";
 import {
   getEnvironmentOptions,
   loadAppConfig,
@@ -9,6 +9,7 @@ import {
   normalizeVisibleRoots,
   resolveRepoPath,
   toGitSettingsSummary,
+  updateEnvironmentOptions,
   updateCommitMessagePrefix
 } from "./config";
 import { ConfigFileValidationError } from "./fileValidation";
@@ -16,15 +17,18 @@ import {
   commitAndPushFile,
   discardRepoFileChanges,
   FileConflictError,
+  getEnvironmentIdForFile,
   inspectRepo,
   listRepoFiles,
+  readEnvironmentReviewCommits,
+  readEnvironmentReviewDiff,
   readFileDetail,
   repoExists,
   restoreFileToHistoryCommit,
-  syncRepo,
-  writeRepoFile
+  syncRepo
 } from "./git";
 import { RepoEventHub, RepoWatcher } from "./repoWatcher";
+import type { AppConfig } from "./types";
 
 const app = express();
 const notifier = new RepoEventHub();
@@ -39,6 +43,40 @@ app.use(express.json({ limit: "5mb" }));
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "未知错误";
+}
+
+function toStatusCode(error: unknown): number {
+  const statusCode =
+    error && typeof error === "object" && "statusCode" in error
+      ? Number((error as { statusCode?: unknown }).statusCode)
+      : 0;
+  return Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+    ? statusCode
+    : 500;
+}
+
+function isProtectedEnvironmentId(environmentId: string | null): boolean {
+  return environmentId === "uat";
+}
+
+function assertCanMutateFile(request: Request, config: AppConfig, filePath: string): void {
+  const environmentId = getEnvironmentIdForFile(config, filePath);
+  const environment = getEnvironmentOptions(config).find((item) => item.id === environmentId);
+  const requiresAdminToEdit =
+    environment?.requiresAdminToEdit ?? isProtectedEnvironmentId(environmentId);
+  if (request.user?.role !== "admin" && requiresAdminToEdit) {
+    throw Object.assign(new Error("普通用户在当前环境仅可查看文件与历史记录"), {
+      statusCode: 403
+    });
+  }
+}
+
+function assertAdmin(request: Request): void {
+  if (request.user?.role !== "admin") {
+    throw Object.assign(new Error("仅管理员可操作"), {
+      statusCode: 403
+    });
+  }
 }
 
 function logApiDebug(scope: string, payload: Record<string, unknown>): void {
@@ -140,6 +178,14 @@ app.post("/api/auth/logout", async (request, response, next) => {
 
 app.use("/api", requireAuth);
 
+app.post("/api/auth/activate-admin", async (request, response, next) => {
+  try {
+    await activateAdmin(request, response);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/bootstrap", async (_request, response, next) => {
   try {
     response.json({
@@ -166,23 +212,54 @@ app.get("/api/file", async (request, response, next) => {
   }
 });
 
-app.put("/api/file", async (request, response, next) => {
+app.get("/api/review/changes", async (request, response, next) => {
   try {
-    const filePath = String(request.body.path ?? "").trim();
-    const content = String(request.body.content ?? "");
-    if (!filePath) {
-      response.status(400).json({ error: "缺少文件路径" });
+    const environmentId = String(request.query.environmentId ?? "").trim();
+    const since = String(request.query.since ?? "").trim();
+    const until = String(request.query.until ?? "").trim();
+    if (!environmentId) {
+      response.status(400).json({ error: "缺少环境标识" });
+      return;
+    }
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(since) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(until) ||
+      Number.isNaN(new Date(since).getTime()) ||
+      Number.isNaN(new Date(until).getTime())
+    ) {
+      response.status(400).json({ error: "请选择有效日期" });
       return;
     }
 
     const config = await loadAppConfig();
-    const detail = await writeRepoFile(config, filePath, content);
-    await ensureWatcher();
-    notifier.broadcast("repo-changed", {
-      relativePath: filePath,
-      eventType: "save"
+    response.json({
+      commits: await readEnvironmentReviewCommits(config, { environmentId, since, until })
     });
-    response.json(detail);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/review/diff", async (request, response, next) => {
+  try {
+    const environmentId = String(request.query.environmentId ?? "").trim();
+    const hash = String(request.query.hash ?? "").trim();
+    const filePath = String(request.query.path ?? "").trim();
+    if (!environmentId) {
+      response.status(400).json({ error: "缺少环境标识" });
+      return;
+    }
+    if (!hash || !filePath) {
+      response.status(400).json({ error: "缺少版本或文件路径" });
+      return;
+    }
+
+    const config = await loadAppConfig();
+    response.json(await readEnvironmentReviewDiff(config, {
+      environmentId,
+      hash,
+      path: filePath
+    }));
   } catch (error) {
     next(error);
   }
@@ -197,6 +274,7 @@ app.post("/api/file/discard", async (request, response, next) => {
     }
 
     const config = await loadAppConfig();
+    assertCanMutateFile(request, config, filePath);
     const detail = await discardRepoFileChanges(config, filePath);
     await ensureWatcher();
     notifier.broadcast("repo-changed", {
@@ -218,6 +296,33 @@ app.post("/api/settings/git", async (request, response, next) => {
     const config = await updateCommitMessagePrefix(prefix);
     response.json({
       gitSettings: toGitSettingsSummary(config)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/settings/environments", async (request, response, next) => {
+  try {
+    assertAdmin(request);
+    const config = await loadAppConfig();
+    response.json({
+      environments: getEnvironmentOptions(config)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/settings/environments", async (request, response, next) => {
+  try {
+    assertAdmin(request);
+    const environments = Array.isArray(request.body.environments)
+      ? request.body.environments
+      : [];
+    const config = await updateEnvironmentOptions(environments);
+    response.json({
+      environments: getEnvironmentOptions(config)
     });
   } catch (error) {
     next(error);
@@ -260,6 +365,7 @@ app.post("/api/commit", async (request, response, next) => {
     }
 
     const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
+    assertCanMutateFile(request, config, filePath);
     const result = await commitAndPushFile(config, runtime, {
       path: filePath,
       content,
@@ -305,6 +411,7 @@ app.post("/api/file/restore", async (request, response, next) => {
     }
 
     const [config, runtime] = await Promise.all([loadAppConfig(), loadRuntimeState()]);
+    assertCanMutateFile(request, config, filePath);
     const result = await restoreFileToHistoryCommit(config, runtime, {
       path: filePath,
       hash,
@@ -357,7 +464,7 @@ app.use(
 
     const message = toErrorMessage(error);
     if (request.path.startsWith("/api/")) {
-      response.status(500).json({ error: message });
+      response.status(toStatusCode(error)).json({ error: message });
       return;
     }
     response.status(500).send(message);

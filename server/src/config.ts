@@ -6,26 +6,26 @@ export const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const APP_CONFIG_PATH = path.resolve(PROJECT_ROOT, "data/app.config.json");
 const RUNTIME_STATE_PATH = path.resolve(PROJECT_ROOT, "data/runtime.json");
 const DEFAULT_CONFIG_ROOT = "nacos-config/config";
+const DEFAULT_REMOTE_URL = "http://12.103.118.207:10880/AI/aifp-config-tob.git";
+const DEFAULT_BRANCH = "main";
 const DEFAULT_ENVIRONMENTS: RepoEnvironmentOption[] = [
   {
     id: "dev",
     label: "开发环境",
-    root: `${DEFAULT_CONFIG_ROOT}/dev`
+    root: `${DEFAULT_CONFIG_ROOT}/dev`,
+    requiresAdminToEdit: false
   },
   {
     id: "sit",
-    label: "测试环境",
-    root: `${DEFAULT_CONFIG_ROOT}/sit`
+    label: "SIT环境",
+    root: `${DEFAULT_CONFIG_ROOT}/sit`,
+    requiresAdminToEdit: false
   },
   {
     id: "uat",
     label: "UAT环境",
-    root: `${DEFAULT_CONFIG_ROOT}/uat`
-  },
-  {
-    id: "prod",
-    label: "生产环境",
-    root: `${DEFAULT_CONFIG_ROOT}/prod`
+    root: `${DEFAULT_CONFIG_ROOT}/uat`,
+    requiresAdminToEdit: true
   }
 ];
 
@@ -35,8 +35,8 @@ const DEFAULT_APP_CONFIG: AppConfig = {
   },
   repo: {
     localPath: "./data/repo",
-    remoteUrl: "http://12.103.118.207:10880/AI/aifp-config-tob.git",
-    branch: "main",
+    remoteUrl: DEFAULT_REMOTE_URL,
+    branch: DEFAULT_BRANCH,
     configRoot: DEFAULT_CONFIG_ROOT,
     allowedExtensions: [
       "",
@@ -80,16 +80,60 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
   }
 }
 
+function normalizeRoot(root: string): string {
+  return root.trim().replace(/^\/+|\/+$/g, "");
+}
+
+function getDefaultEnvironmentRoots(configRoot: string): RepoEnvironmentOption[] {
+  const normalizedConfigRoot = normalizeRoot(configRoot || DEFAULT_CONFIG_ROOT);
+  return DEFAULT_ENVIRONMENTS.map((item) => ({
+    ...item,
+    root: normalizedConfigRoot ? `${normalizedConfigRoot}/${item.id}` : item.root
+  }));
+}
+
+function normalizeEnvironmentOptions(
+  rawEnvironments: RepoEnvironmentOption[] | undefined,
+  configRoot: string
+): RepoEnvironmentOption[] {
+  const source = rawEnvironments?.length
+    ? rawEnvironments
+    : getDefaultEnvironmentRoots(configRoot);
+  const seenIds = new Set<string>();
+
+  return source
+    .map((item, index) => {
+      const fallback = DEFAULT_ENVIRONMENTS[index] ?? DEFAULT_ENVIRONMENTS[0];
+      const id = String(item.id || fallback.id || `env-${index + 1}`)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      const uniqueId = id && !seenIds.has(id) ? id : `env-${index + 1}`;
+      seenIds.add(uniqueId);
+      return {
+        id: uniqueId,
+        label: String(item.label || fallback.label || uniqueId).trim(),
+        root: normalizeRoot(String(item.root || fallback.root || "")),
+        requiresAdminToEdit: Boolean(item.requiresAdminToEdit)
+      };
+    })
+    .filter((item) => item.label && item.root);
+}
+
 function normalizeAppConfig(rawConfig: AppConfig): AppConfig {
+  const remoteUrl = rawConfig.repo?.remoteUrl || DEFAULT_APP_CONFIG.repo.remoteUrl;
+  const branch = rawConfig.repo?.branch || DEFAULT_APP_CONFIG.repo.branch;
+  const configRoot = rawConfig.repo?.configRoot || DEFAULT_APP_CONFIG.repo.configRoot || DEFAULT_CONFIG_ROOT;
   return {
     server: {
       port: rawConfig.server?.port || DEFAULT_APP_CONFIG.server.port
     },
     repo: {
       localPath: rawConfig.repo?.localPath || DEFAULT_APP_CONFIG.repo.localPath,
-      remoteUrl: rawConfig.repo?.remoteUrl || DEFAULT_APP_CONFIG.repo.remoteUrl,
-      branch: rawConfig.repo?.branch || DEFAULT_APP_CONFIG.repo.branch,
-      configRoot: rawConfig.repo?.configRoot || DEFAULT_APP_CONFIG.repo.configRoot,
+      remoteUrl,
+      branch,
+      configRoot,
       visibleRoots: rawConfig.repo?.visibleRoots,
       allowedExtensions:
         rawConfig.repo?.allowedExtensions?.length
@@ -99,6 +143,10 @@ function normalizeAppConfig(rawConfig: AppConfig): AppConfig {
         username: rawConfig.repo?.auth?.username || DEFAULT_APP_CONFIG.repo.auth.username,
         password: rawConfig.repo?.auth?.password || DEFAULT_APP_CONFIG.repo.auth.password
       },
+      environments: normalizeEnvironmentOptions(
+        rawConfig.repo?.environments,
+        configRoot
+      ),
       commitMessagePrefix:
         rawConfig.repo?.commitMessagePrefix ?? DEFAULT_APP_CONFIG.repo.commitMessagePrefix,
       cloneOnStart: rawConfig.repo?.cloneOnStart ?? DEFAULT_APP_CONFIG.repo.cloneOnStart
@@ -140,6 +188,28 @@ export async function updateCommitMessagePrefix(prefix: string): Promise<AppConf
   return saveAppConfig(next);
 }
 
+export async function updateEnvironmentOptions(
+  environments: RepoEnvironmentOption[]
+): Promise<AppConfig> {
+  const current = await loadAppConfig();
+  const normalizedEnvironments = normalizeEnvironmentOptions(
+    environments,
+    current.repo.configRoot || DEFAULT_CONFIG_ROOT
+  );
+  if (!normalizedEnvironments.length) {
+    throw new Error("至少需要保留一个环境配置");
+  }
+
+  return saveAppConfig({
+    ...current,
+    repo: {
+      ...current.repo,
+      environments: normalizedEnvironments,
+      visibleRoots: normalizedEnvironments.map((item) => item.root)
+    }
+  });
+}
+
 export async function markLastSyncedAt(timestamp: string): Promise<RuntimeState> {
   const current = await loadRuntimeState();
   current.lastSyncedAt = timestamp;
@@ -161,17 +231,10 @@ export function normalizeVisibleRoots(config: AppConfig): string[] {
 }
 
 export function getEnvironmentOptions(config: AppConfig): RepoEnvironmentOption[] {
-  const configRoot = (config.repo.configRoot || DEFAULT_CONFIG_ROOT)
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
-  if (!configRoot) {
-    return DEFAULT_ENVIRONMENTS;
-  }
-
-  return DEFAULT_ENVIRONMENTS.map((item) => ({
-    ...item,
-    root: `${configRoot}/${item.id}`
-  }));
+  return normalizeEnvironmentOptions(
+    config.repo.environments,
+    config.repo.configRoot || DEFAULT_CONFIG_ROOT
+  );
 }
 
 export function toGitSettingsSummary(config: AppConfig): GitSettingsSummary {

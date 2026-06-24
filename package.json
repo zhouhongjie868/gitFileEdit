@@ -11,6 +11,7 @@
     "build:server": "tsc -p server/tsconfig.json",
     "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit",
     "auth:create-user": "node scripts/create-user.cjs",
+    "auth:create-admin-code": "node scripts/create-admin-code.cjs",
     "test:setup-remote": "node scripts/setup-test-remote.cjs",
     "start": "node dist/server/index.js"
   },

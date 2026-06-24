@@ -10,6 +10,7 @@ export interface GitSettingsSummary {
 
 export interface AuthUser {
   id: string;
+  role: "user" | "admin";
 }
 
 export interface RepoStatus {
@@ -28,6 +29,7 @@ export interface RepoEnvironmentOption {
   id: string;
   label: string;
   root: string;
+  requiresAdminToEdit: boolean;
 }
 
 export interface BootstrapResponse {
@@ -51,6 +53,27 @@ export interface CommitSnapshot {
   authorEmail: string;
   committedAt: string;
   message: string;
+  beforeContent: string;
+  afterContent: string;
+}
+
+export interface EnvironmentReviewFile {
+  path: string;
+  status: string;
+}
+
+export interface EnvironmentReviewCommit {
+  hash: string;
+  authorName: string;
+  authorEmail: string;
+  committedAt: string;
+  message: string;
+  files: EnvironmentReviewFile[];
+}
+
+export interface EnvironmentReviewDiff {
+  hash: string;
+  path: string;
   beforeContent: string;
   afterContent: string;
 }

@@ -10,5 +10,6 @@ services:
     environment:
       PORT: "8090"
       APP_SESSION_SECRET: "abcdef123456"
+      APP_ACTIVATION_SECRET: "change-this-activation-secret"
       APP_USERS_PATH: "/app/data/users.json"
     restart: unless-stopped
