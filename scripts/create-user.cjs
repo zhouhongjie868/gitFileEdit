@@ -21,6 +21,14 @@ function readUsers() {
   };
 }
 
+function toPersistedUser(user) {
+  return {
+    id: user.id,
+    passwordHash: user.passwordHash,
+    ...(user.activation ? { activation: user.activation } : {})
+  };
+}
+
 function main() {
   const [id, password] = process.argv.slice(2);
   if (!id || !password) {
@@ -29,18 +37,22 @@ function main() {
   }
 
   const data = readUsers();
-  const user = {
-    id,
-    passwordHash: hashPassword(password)
-  };
   const index = data.users.findIndex((item) => item.id === id);
   if (index >= 0) {
-    data.users[index] = user;
+    data.users[index] = {
+      ...data.users[index],
+      id,
+      passwordHash: hashPassword(password)
+    };
   } else {
-    data.users.push(user);
+    data.users.push({
+      id,
+      passwordHash: hashPassword(password)
+    });
   }
 
   mkdirSync(path.dirname(usersPath), { recursive: true });
+  data.users = data.users.map(toPersistedUser);
   writeFileSync(usersPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   console.log(`Saved user ${id} to ${usersPath}`);
 }

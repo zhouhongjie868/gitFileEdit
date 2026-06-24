@@ -127,12 +127,22 @@ function splitDiffLines(value: string): DiffLine[] {
 }
 
 function VisibleWhitespace(props: { text: string; hasNewline: boolean }): JSX.Element {
-  const visibleText = props.text.replace(/ /g, "·").replace(/\t/g, "⇥");
+  const whitespaceClass = "text-[#c2cdd1]";
 
   return (
     <>
-      {visibleText || (!props.hasNewline ? " " : null)}
-      {props.hasNewline ? <span className="ml-1 text-[#84969c]">↵</span> : null}
+      {props.text
+        ? Array.from(props.text).map((char, index) => {
+          if (char === " ") {
+            return <span key={index} className={whitespaceClass}>·</span>;
+          }
+          if (char === "\t") {
+            return <span key={index} className={whitespaceClass}>⇥</span>;
+          }
+          return char;
+        })
+        : !props.hasNewline ? " " : null}
+      {props.hasNewline ? <span className="ml-1 text-[#c2cdd1]">↵</span> : null}
     </>
   );
 }

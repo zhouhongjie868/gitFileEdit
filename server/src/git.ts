@@ -21,6 +21,9 @@ import type {
   CommitSnapshot,
   FileConflictPayload,
   FileDetail,
+  EnvironmentReviewCommit,
+  EnvironmentReviewDiff,
+  EnvironmentReviewFile,
   RepoFileSummary,
   RepoStatus,
   RuntimeState
@@ -61,7 +64,7 @@ function normalizeAllowedFilePath(config: AppConfig, repoPath: string, filePath:
   const repoRelativePath = normalizeRepoRelativePath(repoPath, filePath);
   const visibleRoots = normalizeVisibleRoots(config);
   if (!isInVisibleRoots(repoRelativePath, visibleRoots)) {
-    throw new Error("仅允许访问 dev、sit、uat、prod 目录下的文件");
+    throw new Error("仅允许访问 dev、sit、uat 目录下的文件");
   }
   return repoRelativePath;
 }
@@ -74,6 +77,30 @@ function getEnvironmentLabelForFile(config: AppConfig, repoRelativePath: string)
   });
 
   return matchedEnvironment?.label ?? null;
+}
+
+function getEnvironmentRoot(config: AppConfig, repoPath: string, environmentId: string): string {
+  const environment = getEnvironmentOptions(config).find((item) => item.id === environmentId);
+  if (!environment) {
+    throw new Error("未知环境");
+  }
+  return normalizeRepoRelativePath(repoPath, environment.root);
+}
+
+function isAllowedConfigFile(config: AppConfig, repoRelativePath: string): boolean {
+  return config.repo.allowedExtensions.includes(path.extname(repoRelativePath).toLowerCase());
+}
+
+export function getEnvironmentIdForFile(config: AppConfig, filePath: string): string | null {
+  const repoPath = resolveRepoPath(config);
+  const repoRelativePath = normalizeAllowedFilePath(config, repoPath, filePath);
+  const normalizedPath = repoRelativePath.replace(/^\/+/, "");
+  const matchedEnvironment = getEnvironmentOptions(config).find((environment) => {
+    const root = environment.root.replace(/^\/+|\/+$/g, "");
+    return normalizedPath === root || normalizedPath.startsWith(`${root}/`);
+  });
+
+  return matchedEnvironment?.id ?? null;
 }
 
 function getConfiguredRepoAuth(config: AppConfig): {
@@ -551,6 +578,110 @@ async function readFileHistorySnapshots(
   );
 }
 
+function parseReviewFileLine(
+  config: AppConfig,
+  environmentRoot: string,
+  line: string
+): EnvironmentReviewFile | null {
+  const [status, ...paths] = line.split("\t");
+  const filePath = paths[paths.length - 1]?.trim();
+  if (!status || !filePath) {
+    return null;
+  }
+  if (!isInVisibleRoots(filePath, [environmentRoot]) || !isAllowedConfigFile(config, filePath)) {
+    return null;
+  }
+  return {
+    path: filePath,
+    status
+  };
+}
+
+export async function readEnvironmentReviewCommits(
+  config: AppConfig,
+  input: {
+    environmentId: string;
+    since: string;
+    until: string;
+  }
+): Promise<EnvironmentReviewCommit[]> {
+  const repoPath = resolveRepoPath(config);
+  const environmentRoot = getEnvironmentRoot(config, repoPath, input.environmentId);
+  const rawLog = await runGit(
+    [
+      "log",
+      "--max-count=200",
+      `--since=${input.since}`,
+      `--until=${input.until} 23:59:59`,
+      "--date=iso-strict",
+      "--format=%x1e%H%x1f%an%x1f%ae%x1f%ad%x1f%s",
+      "--name-status",
+      "--",
+      environmentRoot
+    ],
+    { cwd: repoPath }
+  ).catch(() => "");
+
+  return rawLog
+    .split("\x1e")
+    .map((record): EnvironmentReviewCommit | null => {
+      const lines = record
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const [meta, ...fileLines] = lines;
+      if (!meta) {
+        return null;
+      }
+
+      const [hash, authorName, authorEmail, committedAt, message] = meta.split("\x1f");
+      const files = fileLines
+        .map((line) => parseReviewFileLine(config, environmentRoot, line))
+        .filter((file): file is EnvironmentReviewFile => Boolean(file));
+      if (!hash || files.length === 0) {
+        return null;
+      }
+
+      return {
+        hash,
+        authorName,
+        authorEmail,
+        committedAt,
+        message: message ?? "",
+        files
+      };
+    })
+    .filter((commit): commit is EnvironmentReviewCommit => Boolean(commit));
+}
+
+export async function readEnvironmentReviewDiff(
+  config: AppConfig,
+  input: {
+    environmentId: string;
+    hash: string;
+    path: string;
+  }
+): Promise<EnvironmentReviewDiff> {
+  const repoPath = resolveRepoPath(config);
+  const environmentRoot = getEnvironmentRoot(config, repoPath, input.environmentId);
+  const repoRelativePath = normalizeAllowedFilePath(config, repoPath, input.path);
+  if (!isInVisibleRoots(repoRelativePath, [environmentRoot]) || !isAllowedConfigFile(config, repoRelativePath)) {
+    throw new Error("文件不在当前环境内");
+  }
+
+  const [beforeContent, afterContent] = await Promise.all([
+    readGitFile(repoPath, `${input.hash}^`, repoRelativePath),
+    readGitFile(repoPath, input.hash, repoRelativePath)
+  ]);
+
+  return {
+    hash: input.hash,
+    path: repoRelativePath,
+    beforeContent,
+    afterContent
+  };
+}
+
 export async function readFileDetail(
   config: AppConfig,
   filePath: string
@@ -601,27 +732,13 @@ export async function readFileDetail(
   };
 }
 
-export async function writeRepoFile(
-  config: AppConfig,
-  filePath: string,
-  content: string
-): Promise<FileDetail> {
-  const repoPath = resolveRepoPath(config);
-  const repoRelativePath = normalizeAllowedFilePath(config, repoPath, filePath);
-  const absolutePath = path.resolve(repoPath, repoRelativePath);
-  validateConfigFileContent(repoRelativePath, content);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, content, "utf8");
-  return readFileDetail(config, repoRelativePath);
-}
-
 export async function discardRepoFileChanges(
   config: AppConfig,
   filePath: string
 ): Promise<FileDetail> {
   const repoPath = resolveRepoPath(config);
   const repoRelativePath = normalizeAllowedFilePath(config, repoPath, filePath);
-  await runGit(["restore", "--staged", "--worktree", "--", repoRelativePath], {
+  await runGit(["restore", "--worktree", "--", repoRelativePath], {
     cwd: repoPath
   });
   return readFileDetail(config, repoRelativePath);

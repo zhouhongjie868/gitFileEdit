@@ -2,6 +2,14 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { NextFunction, Request, Response } from "express";
+import {
+  hashActivationCode,
+  loadActivationRedemptions,
+  parseValidActivationCodeForUser,
+  saveActivationRedemptions,
+  type StoredAdminActivation,
+  verifyStoredAdminActivation
+} from "./activation";
 import { PROJECT_ROOT } from "./config";
 import type { AuthUser } from "./types";
 
@@ -13,7 +21,9 @@ declare global {
   }
 }
 
-interface StoredUser extends AuthUser {
+interface StoredUser {
+  id: string;
+  activation?: StoredAdminActivation;
   passwordHash: string;
 }
 
@@ -31,6 +41,7 @@ const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const usersPath = process.env.APP_USERS_PATH || path.resolve(PROJECT_ROOT, "data/users.json");
 const sessions = new Map<string, SessionRecord>();
 const loginFailures = new Map<string, { count: number; lockedUntil: number }>();
+const activationFailures = new Map<string, { count: number; lockedUntil: number }>();
 
 function getSessionSecret(): string {
   const secret = process.env.APP_SESSION_SECRET?.trim();
@@ -170,11 +181,16 @@ function hashPassword(password: string): string {
 
 async function saveUsers(users: StoredUser[]): Promise<void> {
   await mkdir(path.dirname(usersPath), { recursive: true });
+  const persistedUsers = users.map((user) => ({
+    id: user.id,
+    passwordHash: user.passwordHash,
+    ...(user.activation ? { activation: user.activation } : {})
+  }));
   await writeFile(
     usersPath,
     `${JSON.stringify(
       {
-        users
+        users: persistedUsers
       },
       null,
       2
@@ -208,13 +224,35 @@ function clearLoginFailure(request: Request, username: string): void {
   loginFailures.delete(getFailureKey(request, username));
 }
 
+function assertActivationNotRateLimited(request: Request, username: string): void {
+  const failure = activationFailures.get(getFailureKey(request, username));
+  if (failure && failure.lockedUntil > Date.now()) {
+    throw new Error("激活失败次数过多，请稍后再试");
+  }
+}
+
+function markActivationFailure(request: Request, username: string): void {
+  const key = getFailureKey(request, username);
+  const current = activationFailures.get(key) ?? { count: 0, lockedUntil: 0 };
+  const count = current.lockedUntil > Date.now() ? current.count : current.count + 1;
+  activationFailures.set(key, {
+    count,
+    lockedUntil: count >= 8 ? Date.now() + 10 * 60 * 1000 : 0
+  });
+}
+
+function clearActivationFailure(request: Request, username: string): void {
+  activationFailures.delete(getFailureKey(request, username));
+}
+
 async function findUserById(userId: string): Promise<AuthUser | null> {
   const user = (await loadUsers()).find((item) => item.id === userId);
   if (!user) {
     return null;
   }
   return {
-    id: user.id
+    id: user.id,
+    role: verifyStoredAdminActivation(user.id, user.activation) ? "admin" : "user"
   };
 }
 
@@ -252,7 +290,8 @@ function startSession(response: Response, userId: string): void {
 
 function toAuthUser(user: StoredUser): AuthUser {
   return {
-    id: user.id
+    id: user.id,
+    role: verifyStoredAdminActivation(user.id, user.activation) ? "admin" : "user"
   };
 }
 
@@ -316,6 +355,73 @@ export async function register(request: Request, response: Response): Promise<vo
   await saveUsers(users);
   startSession(response, user.id);
   response.status(201).json({
+    user: toAuthUser(user)
+  });
+}
+
+export async function activateAdmin(request: Request, response: Response): Promise<void> {
+  const code = String(request.body.code ?? "").trim();
+  const currentUser = request.user;
+  if (!currentUser) {
+    response.status(401).json({ error: "未登录" });
+    return;
+  }
+  if (!code) {
+    response.status(400).json({ error: "请输入激活码" });
+    return;
+  }
+
+  try {
+    assertActivationNotRateLimited(request, currentUser.id);
+  } catch (error) {
+    response.status(429).json({ error: (error as Error).message });
+    return;
+  }
+
+  const users = await loadUsers();
+  const user = users.find((item) => item.id === currentUser.id);
+  if (!user) {
+    response.status(401).json({ error: "未登录" });
+    return;
+  }
+
+  let parsedActivation: Omit<StoredAdminActivation, "activatedAt">;
+  try {
+    parsedActivation = parseValidActivationCodeForUser(user.id, code);
+  } catch (error) {
+    markActivationFailure(request, user.id);
+    response.status(400).json({ error: (error as Error).message });
+    return;
+  }
+
+  const codeHash = hashActivationCode(code);
+  const redemptions = await loadActivationRedemptions();
+  if (redemptions.some((item) => item.codeHash === codeHash)) {
+    markActivationFailure(request, user.id);
+    response.status(409).json({ error: "激活码已被使用" });
+    return;
+  }
+
+  if (verifyStoredAdminActivation(user.id, user.activation)) {
+    clearActivationFailure(request, user.id);
+    response.json({ user: toAuthUser(user) });
+    return;
+  }
+
+  const usedAt = new Date().toISOString();
+  user.activation = {
+    ...parsedActivation,
+    activatedAt: usedAt
+  };
+  await saveUsers(users);
+  redemptions.push({
+    codeHash,
+    usedBy: user.id,
+    usedAt
+  });
+  await saveActivationRedemptions(redemptions);
+  clearActivationFailure(request, user.id);
+  response.json({
     user: toAuthUser(user)
   });
 }

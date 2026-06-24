@@ -7,6 +7,11 @@
     "remoteUrl": "http://12.103.118.207:10880/AI/aifp-config-tob.git",
     "branch": "master",
     "configRoot": "nacos-config/config",
+    "visibleRoots": [
+      "nacos-config/config/dev",
+      "nacos-config/config/sit",
+      "nacos-config/config/uat"
+    ],
     "allowedExtensions": [
       "",
       ".json",
@@ -32,6 +37,26 @@
       "username": "rhb",
       "password": "nbcb,111"
     },
+    "environments": [
+      {
+        "id": "dev",
+        "label": "开发环境",
+        "root": "nacos-config/config/dev",
+        "requiresAdminToEdit": false
+      },
+      {
+        "id": "sit",
+        "label": "SIT环境",
+        "root": "nacos-config/config/sit",
+        "requiresAdminToEdit": false
+      },
+      {
+        "id": "uat",
+        "label": "UAT环境",
+        "root": "nacos-config/config/uat",
+        "requiresAdminToEdit": true
+      }
+    ],
     "commitMessagePrefix": "config: ",
     "cloneOnStart": true
   }

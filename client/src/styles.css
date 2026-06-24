@@ -71,6 +71,14 @@
     @apply hidden;
   }
 
+  .review-date-input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    height: 20px;
+    margin-right: -4px;
+    padding: 5px;
+    width: 20px;
+  }
+
   #root {
     @apply min-h-screen;
   }
